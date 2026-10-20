@@ -1,0 +1,32 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>PIW Study</title>
+  <link rel="stylesheet" href="sidepanel.css">
+</head>
+<body>
+  <header>
+    <div class="row">
+      <span class="brand">
+        <button id="restart" class="icon" title="Start over — deletes all saved progress">↺</button>
+        <img class="logo" src="icons/icon.svg" alt=""><b>PIW Study</b>
+      </span>
+      <span><span id="progress-label"></span><button id="close" class="icon" title="Close panel — your progress is saved. Reopen it from the toolbar icon.">✕</button></span>
+    </div>
+    <div class="bar"><div id="progress"></div></div>
+    <h2 id="title"></h2>
+  </header>
+  <div id="banner" hidden>You're not on ChatGPT. <a href="#" id="goto-chatgpt">Go to ChatGPT</a></div>
+  <main id="view"></main>
+  <footer>
+    <div id="errors" hidden></div>
+    <div class="row">
+      <button id="back">Back</button>
+      <button id="next" class="primary">Next</button>
+    </div>
+  </footer>
+  <script src="study.js"></script>
+  <script src="sidepanel.js"></script>
+</body>
+</html>

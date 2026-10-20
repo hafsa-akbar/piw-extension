@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="4 2 92 92">
+  <defs>
+    <clipPath id="halfL"><rect x="0" y="0" width="50" height="100"/></clipPath>
+    <clipPath id="halfR"><rect x="50" y="0" width="50" height="100"/></clipPath>
+    <path id="bubble" d="M26 10 H74 A16 16 0 0 1 90 26 V54 A16 16 0 0 1 74 70 H46 L30 86 V70 H26 A16 16 0 0 1 10 54 V26 A16 16 0 0 1 26 10 Z"/>
+    <g id="person-solid"><circle cx="50" cy="31" r="10"/><path d="M30 61 A20 13 0 0 1 70 61 Z"/></g>
+    <g id="person-dashed"><circle cx="50" cy="31" r="10"/><path d="M30 61 A20 13 0 0 1 70 61"/></g>
+  </defs>
+  <!-- white bubble with halo (keeps it legible on dark toolbars), then the crimson logo on top -->
+  <use href="#bubble" fill="#fff" stroke="#fff" stroke-width="8.5" stroke-linejoin="round" stroke-linecap="round"/>
+  <use href="#person-solid" clip-path="url(#halfL)" fill="#fff" stroke="#fff" stroke-width="7" stroke-linejoin="round"/>
+  <use href="#person-dashed" clip-path="url(#halfR)" fill="none" stroke="#fff" stroke-width="7" stroke-dasharray="5 11" stroke-linecap="round"/>
+  <use href="#bubble" fill="none" stroke="#8a1538" stroke-width="6" stroke-linejoin="round" stroke-linecap="round"/>
+  <use href="#person-solid" clip-path="url(#halfL)" fill="#8a1538" stroke="#8a1538" stroke-width="4.5" stroke-linejoin="round"/>
+  <use href="#person-dashed" clip-path="url(#halfR)" fill="none" stroke="#8a1538" stroke-width="4.5" stroke-dasharray="5 11" stroke-linecap="round"/>
+</svg>
