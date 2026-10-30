@@ -14,6 +14,7 @@ It only works on chatgpt.com and never sends participant data anywhere ([privacy
 
 The prompts are not in the extension. Each participant gets one random prompt from each dataset listed in `battery.json` in
 [llm-personalization-ecological-validity](https://github.com/hafsa-akbar/llm-personalization-ecological-validity).
+An entry can also limit a dataset to some of its prompts, e.g. `{"moral_judgment": ["aita_001", "aita_004"]}`.
 Edit that repo to change prompts; no new extension version needed.
 
 ## Files

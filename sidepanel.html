@@ -15,7 +15,7 @@
       <span><span id="progress-label"></span><button id="close" class="icon" title="Close panel — your progress is saved. Reopen it from the toolbar icon.">✕</button></span>
     </div>
     <div class="bar"><div id="progress"></div></div>
-    <h2 id="title"></h2>
+    <div class="titlebar"><h2 id="title"></h2><div class="zoom"><button id="zoom-out" title="Zoom out">−</button>/<button id="zoom-in" title="Zoom in">+</button></div></div>
   </header>
   <div id="banner" hidden>You're not on ChatGPT. <a href="#" id="goto-chatgpt">Go to ChatGPT</a></div>
   <main id="view"></main>
@@ -26,6 +26,7 @@
       <button id="next" class="primary">Next</button>
     </div>
   </footer>
+  <div id="lightbox" hidden><div class="stage"></div><div class="hint">Pinch or Ctrl + scroll to zoom · click to close</div></div>
   <script src="study.js"></script>
   <script src="sidepanel.js"></script>
 </body>

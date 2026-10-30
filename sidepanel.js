@@ -24,11 +24,11 @@ let state;
 let timer = null;
 let busy = 0; // number of actions / Next checks running; live updates pause meanwhile
 let checking = false; // Next is running its checks
-const freshUi = () => ({ confirmed: false, conv: null, lastText: null, discarded: null, settings: null, followup: null, traits: null, order: null });
+const freshUi = () => ({ confirmed: false, pickManual: false, pickSelf: false, clicked: false, conv: null, lastText: null, discarded: null, settings: null, followup: null, traits: null, order: null });
 let ui = freshUi();
 
 const newData = () => ({
-  schema_version: 4,
+  schema_version: 5,
   extension_version: chrome.runtime.getManifest().version,
   participant_id: "",
   consent: null,
@@ -51,6 +51,20 @@ const item = (i) => D().battery.items[i];
 const promptOf = (s) => (s.capture.prompt ? PROMPTS[s.capture.prompt] : item(s.capture.item).prompt);
 const save = () => chrome.storage.local.set({ piw: state });
 const update = async (fn) => { fn(D()); await save(); render(); };
+
+// The kinds of chat a step can need. `pick` = the dropdown choice; `blue` = blue send button; `ok` checks a read conversation.
+const CHATS = {
+  regular: { name: "regular chat", url: CHATGPT, blue: true, ok: (c) => !c.temporary },
+  temporary: { name: "Temporary Chat", url: TEMP_URL, ok: (c) => c.temporary },
+  personalized: { name: "Personalized Temporary Chat", url: TEMP_URL, pick: true, blue: true, ok: (c) => c.personalized === true },
+  unpersonalized: { name: "Unpersonalized Temporary Chat", url: TEMP_URL, pick: false, ok: (c) => c.personalized === false },
+};
+// Accounts with the Personalized/Unpersonalized dropdown run P+ and P− in a Temporary Chat; the others use a regular chat
+// for P+ and a Temporary Chat for P−. The profile card and follow-up always use a regular chat. Whether the account has
+// the dropdown is unknown until the first Temporary Chat is opened (see newChat).
+const hasToggle = () => D().account.personalization_toggle;
+const chatOf = (personalized) => CHATS[hasToggle() ? (personalized ? "personalized" : "unpersonalized") : personalized ? "regular" : "temporary"];
+const chatFor = (s) => (s.capture.prompt ? CHATS.regular : chatOf(s.capture.personalized));
 
 // ---------- ChatGPT tab ----------
 
@@ -90,6 +104,23 @@ async function openChat(url) {
   await sleep(800); // let ChatGPT's app render
 }
 
+async function newChat(chat) {
+  await openChat(chat.url);
+  if (chat.url === TEMP_URL && hasToggle() === undefined) {
+    const found = (await until(() => run("readPersonalized"), (v) => v != null, 4000)) != null;
+    await update((d) => { d.account.personalization_toggle = found; });
+    if (found) chat = CHATS.unpersonalized;
+  }
+  if (chat.pick === undefined) return;
+  // The dropdown sometimes doesn't show a choice until the page is reloaded, so if it didn't stick, reload and read it again.
+  if ((await until(() => run("setPersonalized", chat.pick), (v) => v != null)) === chat.pick) return;
+  await openChat(chat.url);
+  if ((await until(() => run("readPersonalized"), (v) => v === chat.pick, 4000)) === chat.pick) return;
+  ui.pickManual = true;
+  renderPick();
+  throw new Error(`Couldn't select ${chat.pick ? "Personalized" : "Unpersonalized"} at the top right. Choose it yourself before sending.`);
+}
+
 // Polls get() until test(value) passes or time runs out; returns the last value.
 async function until(get, test, ms = 10000) {
   const end = Date.now() + ms;
@@ -115,16 +146,28 @@ const mark = { ok: "✓", bad: "✗", wait: "○" };
 const line = (status, html) => `<li><span class="dot ${status}">${mark[status]}</span><span>${html}</span></li>`;
 const act = (name, label) => `<a class="act" data-act="${name}">${label}</a>`;
 const promptBlock = (text) => `<div class="prompt"><button class="copy" data-copy="${esc(text)}" title="Copy">${COPY_ICON}</button><pre>${esc(text)}</pre></div>`;
-const sendIcon = (temporary) => `<img class="send" src="assets/send-${temporary ? "temp" : "regular"}.png" alt="Send">`;
+const sendIcon = (chat) => `the <svg class="send" viewBox="0 0 24 24" aria-label="Send"><circle cx="12" cy="12" r="12" fill="${chat.blue ? "#4d81ef" : "#8f8f8f"}"/>
+  <path d="M12 17V7m-4.5 4.5L12 7l4.5 4.5" stroke="#fff" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg> button`;
+const guideVideo = (personalized) => `<video class="shot" src="assets/${personalized ? "" : "un"}personalized-guide.mp4" autoplay loop muted playsinline></video>`;
+// The dropdown step's checkbox: ticked by the helper when the page shows the right choice. The participant can tick it
+// only after the helper said it couldn't select or confirm the choice (ui.pickManual).
+function renderPick() {
+  const box = $("#pick"), chat = chatFor(step());
+  if (!box) return;
+  const auto = !!ui.conv && chat.ok(ui.conv);
+  box.innerHTML = `<label class="check"><input type="checkbox" id="pickbox" ${auto || ui.pickSelf ? "checked" : ""} ${ui.pickManual ? "" : "disabled"}>
+    <span><b>${chat.pick ? "Personalized" : "Unpersonalized"}</b> is selected in the Temporary Chat</span></label>`;
+  $("#pickbox").onchange = (e) => (ui.pickSelf = e.target.checked);
+}
 // Free and Go have a Think button (left off) and no model picker; paid plans pick Instant thinking and GPT-6.
 const basicPlan = () => ["Free", "Go"].includes(D().account?.plan);
-function confirmBox(temporary) {
+function confirmBox(chat) {
   const basic = basicPlan();
   const model = basic ? "<b>Think</b> is off" : "Thinking effort is <b>Instant</b> and the model is <b>GPT-6</b>";
-  const text = temporary ? model : `<b>Chat</b> is selected${basic ? " and " : ", "}${model}`;
-  const guide = !temporary ? `<video src="assets/${basic ? "free-go" : "paid"}-chat.webm" autoplay loop muted playsinline></video>`
+  const text = chat === CHATS.regular ? `<b>Chat</b> is selected${basic ? " and " : ", "}${model}` : model;
+  const guide = chat === CHATS.regular ? `<video src="assets/${basic ? "free-go" : "paid"}-chat.webm" autoplay loop muted playsinline></video>`
     : basic ? `<img src="assets/free-go-think-off.jpg" alt="The Think button in ChatGPT's message box, left off">`
-    : `<img src="assets/paid-temp-chat.gif" alt="In a Temporary Chat, open Thinking effort, choose Instant, then choose GPT-6">`;
+    : `<video src="assets/paid-model.webm" autoplay loop muted playsinline></video>`;
   return `
     <label class="check"><input type="checkbox" id="confirm" ${ui.confirmed ? "checked" : ""}> <span>${text}</span></label>
     <details class="where"><summary>Show me how</summary>${guide}</details>`;
@@ -143,6 +186,7 @@ function render() {
   $("#view").innerHTML = v.html(s);
   bind($("#view"));
   v.bind?.(s);
+  cue();
   $("#back").style.visibility = state.step === 0 ? "hidden" : "visible";
   $("#next").hidden = s.id === "review";
   $("#next").textContent = v.nextLabel || "Next";
@@ -157,6 +201,8 @@ function bind(root) {
     e.preventDefault();
     if (el.classList.contains("busy")) return;
     busy++;
+    ui.clicked = true;
+    cue();
     el.classList.add("busy");
     setErrors();
     try { await (view(step()).actions?.[el.dataset.act] || COMMON[el.dataset.act])(step(), el); }
@@ -168,6 +214,12 @@ function bind(root) {
     el.textContent = "✓";
     setTimeout(() => (el.innerHTML = COPY_ICON), 1200);
   }));
+}
+
+// A "click here" pointer on the first link of the plan and profile-card steps, until a link is clicked.
+function cue() {
+  $(".cue")?.remove();
+  if (["account", "traits"].includes(step().id) && !ui.clicked) $("#view [data-act]").insertAdjacentHTML("afterend", `<span class="cue">← click here</span>`);
 }
 
 function setErrors(list = []) {
@@ -206,19 +258,21 @@ const VIEWS = {
     nextLabel: "Agree & start",
     html: () => `
       <div class="consent">${CONSENT_HTML}</div>
-      <label>Prolific ID<input type="text" id="pid" value="${esc(D().participant_id)}"></label>
+      <label>Prolific ID <span class="muted">(optional)</span><input type="text" id="pid" value="${esc(D().participant_id)}"></label>
+      <details class="help"><summary>How do I find my Prolific ID?</summary><ol>
+        <li>Log in to your Prolific account.</li>
+        <li>Go to the <b>Account</b> page.</li>
+        <li>Your Prolific ID is shown there. Copy it into the box above.</li>
+      </ol></details>
       <label class="check"><input type="checkbox" id="age" ${D().consent ? "checked" : ""}> I am 18 or older.</label>
       <label class="check"><input type="checkbox" id="agree" ${D().consent ? "checked" : ""}> I agree to let this helper collect the data listed above from chatgpt.com during this study.</label>`,
     next: async () => {
-      const pid = $("#pid").value.trim(), errors = [];
-      if (!pid) errors.push("Enter your Prolific ID.");
-      if (!$("#age").checked || !$("#agree").checked) errors.push("Tick both boxes to continue.");
-      if (errors.length) return errors;
+      if (!$("#age").checked || !$("#agree").checked) return ["Tick both boxes to continue."];
       let battery = D().battery;
       try { battery ||= await sampleBattery(); }
       catch (e) { return [`Couldn't load the study prompts. Try again in a minute; if it keeps failing, contact the research team. <span class="muted">(${esc(e.message)})</span>`]; }
       await update((d) => {
-        d.participant_id = pid;
+        d.participant_id = $("#pid").value.trim();
         d.consent = { agreed_at: now() };
         d.started_at ||= now();
         d.battery = battery;
@@ -228,7 +282,7 @@ const VIEWS = {
 
   account: {
     html: () => `
-      <p>1. ${act("billing", "Open your billing page")} (log in if ChatGPT asks).</p>
+      <p>1. ${act("billing", "Open your billing page")}<br><span class="muted">Log in if ChatGPT asks.</span></p>
       <p>2. Your plan is the name at the top, e.g. <b>ChatGPT Plus</b>:</p>
       <img class="shot" src="assets/billing.png" alt="chatgpt.com/settings/billing showing the plan name, ChatGPT Plus">
       <p>3. Choose it here:</p>
@@ -245,6 +299,7 @@ const VIEWS = {
     html: () => {
       const m = D().memory_overview;
       return `
+        <p class="muted">Click through these steps in order, or click <b>Do all of this for me</b>.</p>
         <ul class="tasks" id="tasks">${setupTasks()}</ul>
         <p><button class="primary" data-act="all">Do all of this for me</button></p>
         ${m ? `<details><summary class="muted">Your captured Memory Overview${m.source === "manual_paste" ? " (pasted manually)" : ""}</summary><pre>${esc(m.text)}</pre></details>` : ""}
@@ -280,9 +335,7 @@ const VIEWS = {
     next: async () => {
       const pasted = $("#manualmem").value.trim();
       if (!D().memory_overview && pasted) D().memory_overview = { text: pasted, source: "manual_paste", captured_at: now(), flags: ["manual_entry"] };
-      await openSettings();
-      const r = await until(() => run("readSettings", true), (v) => v?.memory_enabled != null && v?.web_search != null, 5000);
-      if (r?.on_page) await saveSettings({ observed: r }, false);
+      await ensureSettingsPage();
       const s = D().settings, errors = [];
       const mem = s?.memory_enabled.observed ?? s?.memory_enabled.self_report;
       const web = s?.web_search.observed ?? s?.web_search.self_report;
@@ -296,24 +349,30 @@ const VIEWS = {
   },
 
   intro: {
-    html: (s) => s.part.temporary ? `
+    html: (s) => s.part.personalized ? `
+      <p>That's Part 1 done!</p>
+      <p>Now we will ask ChatGPT for the <b>personalized</b> answers: the same ${D().battery.items.length} prompts again, each in a <b>new ${chatOf(true).name}</b>
+      ${hasToggle() ? "" : " (Temporary Chat off)"}.</p>
+      ${hasToggle() ? guideVideo(true) : ""}` : `
       <p>To see how ChatGPT personalizes its answers, we first need its <b>baseline</b> answers, which <i>aren't</i> personalized to you.
       Temporary Chat gives us these "unpersonalized" responses and operates in an incognito mode.</p>
       <p>For this section, we will ask you to insert ${D().battery.items.length} prompts one by one, each in a new Temporary Chat:</p>
-      <img class="shot" src="assets/${basicPlan() ? "free-go-temp-chat.jpg" : "paid-temp-chat-toggle.jpg"}" alt="The Temporary Chat icon at the top right of ChatGPT, off and then on">
-      <p class="muted">Don't tell ChatGPT you're in a study, and don't send anything other than the prompt.</p>` : `
-      <p>That's Part 1 done!</p>
-      <p>Now we will ask ChatGPT for the <b>personalized</b> answers: the same ${D().battery.items.length} prompts again, each in a <b>new regular chat</b> (Temporary Chat off).</p>`
+      ${hasToggle() ? guideVideo(false) : `<img class="shot" src="assets/${basicPlan() ? "free-go-temp-chat.jpg" : "paid-temp-chat-toggle.jpg"}" alt="The Temporary Chat icon at the top right of ChatGPT, off and then on">`}
+      ${hasToggle() === undefined ? `<p>${act("newchat", "Open a new Temporary Chat")} to start.</p>` : ""}
+      <p class="muted">Don't tell ChatGPT you're in a study, and don't send anything other than the prompt.</p>`,
+    actions: { newchat: () => newChat(chatOf(false)) },
   },
 
   capture: {
     nextLabel: "Check & save",
     html: (s) => {
-      const { temporary } = s.capture, rec = getRecord(s), text = promptOf(s);
+      const chat = chatFor(s), rec = getRecord(s), text = promptOf(s), n = chat.pick === undefined ? 1 : 2;
       return `
-        <p>1. ${act("newchat", temporary ? "Open a new Temporary Chat" : "Open a new chat")}.</p>
-        <div class="stepline"><span>2.</span><div>${confirmBox(temporary)}</div></div>
-        <p>3. ${act("insert", "Insert the prompt")}, then press ${sendIcon(temporary)} in ChatGPT to send it.</p>
+        <p>1. ${act("newchat", `Open a new ${chat.name}`)}.</p>
+        ${n === 2 ? `<div class="stepline"><span>2.</span><div><div id="pick"></div>
+          <details class="where"><summary>Show me how</summary>${guideVideo(chat.pick)}</details></div></div>` : ""}
+        <div class="stepline"><span>${n + 1}.</span><div>${confirmBox(chat)}</div></div>
+        <p>${n + 2}. ${act("insert", "Insert the prompt")}, then press ${sendIcon(chat)} in ChatGPT to send it.</p>
         ${promptBlock(text)}
         ${rec ? `<div class="box">${rec.flags.length ? `<span class="warn">⚠ Saved with flags: ${esc(rec.flags.join(", "))}</span>` : `<span class="ok">✓ Saved</span>`}
               <pre>${esc(rec.response_text)}</pre><p>${act("redo", "Discard and redo")}</p></div>`
@@ -324,7 +383,7 @@ const VIEWS = {
           <p>You can use the copy icon under the response to copy it exactly:</p>
           <img class="shot small" src="assets/copy-response.png" alt="The Copy response icon under ChatGPT's answer">`)}`;
     },
-    bind: bindConfirm,
+    bind: () => { bindConfirm(); renderPick(); },
     // Checks run silently; they only become messages when Next is clicked. A finished response highlights Next.
     live: async (s) => {
       if (getRecord(s)) return;
@@ -333,6 +392,7 @@ const VIEWS = {
       const text = ui.conv?.messages.find((m) => m.role === "assistant")?.text ?? null;
       if (ui.conv) ui.conv.stable = text !== null && text === ui.lastText;
       ui.lastText = text;
+      renderPick();
       const ready = !!ui.conv && !blockers(checks(ui.conv, s)).length;
       $("#next").classList.toggle("ready", ready);
       const status = $("#status");
@@ -340,7 +400,7 @@ const VIEWS = {
         : `<span class="muted">When ChatGPT has finished responding, click Check &amp; save.</span>`;
     },
     actions: {
-      newchat: (s) => openChat(s.capture.temporary ? TEMP_URL : CHATGPT),
+      newchat: (s) => newChat(chatFor(s)),
       insert: (s) => insert(promptOf(s)),
       redo: async (s) => {
         ui.discarded = getRecord(s)?.response_text ?? null;
@@ -349,7 +409,7 @@ const VIEWS = {
     },
     next: async (s) => {
       if (getRecord(s)) return;
-      if (!ui.confirmed) return ["Tick the box in step 2 once ChatGPT's settings match."];
+      if (!ui.confirmed) return [`Tick the box in step ${chatFor(s).pick === undefined ? 2 : 3} once ChatGPT's settings match.`];
       await VIEWS.capture.live(s);
       await sleep(900);
       await VIEWS.capture.live(s); // second read confirms the response stopped changing
@@ -358,6 +418,7 @@ const VIEWS = {
       const pasted = $("#manualresp").value.trim();
       if (pasted) return setRecord(s, { ...recordBase(s), response_text: pasted, source: "manual_paste", captured_at: now(), flags: ["manual_entry"] });
       if (!ui.conv) return ["Switch to your ChatGPT tab first."];
+      if (blocking[0].code === "chat" && chatFor(s).pick !== undefined) { ui.pickManual = true; renderPick(); }
       return blocking.map((c) => c.hint);
     },
   },
@@ -400,10 +461,9 @@ const VIEWS = {
       const radio = (value, text) => `<label class="check"><input type="radio" name="fu" value="${value}" ${mode === value ? "checked" : ""}> ${text}</label>`;
       return `
         <p>Did ChatGPT leave any trait in its profile card as "unknown" (or refuse to guess)?</p>
-        ${guessFollowup() ? `<p class="warn">⚠ Its response mentions "unknown" or a refusal, so some traits are probably missing.</p>` : ""}
         ${radio("none", "No, it guessed every trait")}
-        ${radio("done", "Yes, and I'll ask the follow-up questions")}
-        ${radio("skipped", "Yes, but I'd rather skip the follow-up")}
+        ${radio("done", "Yes, and I'd like to ask ChatGPT follow-up questions")}
+        ${radio("skipped", "Yes, but I'd rather move on without follow-up questions")}
         <div ${mode === "done" || mode === "skipped" ? "" : "hidden"}>
           <p>Which traits are missing?</p>
           <details class="dropdown"><summary id="traitsum">${traitSummary()}</summary>
@@ -411,8 +471,8 @@ const VIEWS = {
           </details>
         </div>
         <div ${mode === "done" ? "" : "hidden"}>
-          <p>1. ${act("newchat", "Open a new chat")}.</p>
-          <div class="stepline"><span>2.</span><div>${confirmBox(false)}</div></div>
+          <p>1. ${act("newchat", "Open a new regular chat")}.</p>
+          <div class="stepline"><span>2.</span><div>${confirmBox(CHATS.regular)}</div></div>
           <div id="fuprompts">${followupSteps()}</div>
           <p class="status" id="status"></p>
           ${manual(`
@@ -442,7 +502,7 @@ const VIEWS = {
         : `<span class="muted">Once ChatGPT has answered, click Next.</span>`;
     },
     actions: {
-      newchat: () => openChat(CHATGPT),
+      newchat: () => newChat(CHATS.regular),
       p1: () => insert(followupPrompts(ui.traits)[0]),
       p2: () => insert(followupPrompts(ui.traits)[1]),
     },
@@ -460,8 +520,8 @@ const VIEWS = {
         if (pasted) return update((d) => { d.followup = { choice: "done", missing_traits: [...ui.traits], prompts, pasted_response: pasted, source: "manual_paste", captured_at: now(), flags: ["manual_entry"] }; });
         if (!c) return ["Switch to your ChatGPT tab first."];
         if (c.generating) return ["ChatGPT is still responding."];
-        if (c.url === D().responses.traits?.conversation_url) return [`This is the profile-card chat. ${act("newchat", "Open a new chat")} for the follow-up.`];
-        return [`No follow-up answer on the ChatGPT page yet. ${act("newchat", "Open a new chat")} and send Prompt 1.`];
+        if (c.messages.some((m) => m.role === "user" && norm(m.text) === norm(PROMPTS.traits))) return [`This is the profile-card chat. ${act("newchat", "Open a new regular chat")} for the follow-up.`];
+        return [`No follow-up answer on the ChatGPT page yet. ${act("newchat", "Open a new regular chat")} and send Prompt 1.`];
       }
       const flags = [];
       if (c.temporary) flags.push("followup_in_temporary_chat");
@@ -482,11 +542,22 @@ const VIEWS = {
         const rec = recordOf(s), flags = rec?.flags || [];
         return { missing: !rec, html: `<tr><td>${esc(s.title)}</td><td>${!rec ? `<span class="bad">✗ missing</span>` : flags.length ? `<span class="warn">⚠ ${esc(flags.join(", "))}</span>` : `<span class="ok">✓</span>`}</td></tr>` };
       });
-      const complete = !rows.some((r) => r.missing);
+      const missing = rows.filter((r) => r.missing).length, complete = !missing;
+      const init = D().settings.initial;
+      const was = [init.memory_enabled === false && "<b>Enable memory</b> was off", init.web_search === true && "<b>Web Search</b> was on"].filter(Boolean);
       return `
-        <table>${rows.map((r) => r.html).join("")}</table>
-        ${complete ? `<p>All done. Download your data and upload the <code>.json</code> file in the survey.</p>` : `<p class="bad">Some steps are missing — go Back to finish them.</p>`}
+        <details class="checklist" ${complete ? "" : "open"}><summary>${complete ? `<span class="ok">✓ All ${rows.length} steps saved</span>`
+          : `<span class="bad">✗ ${missing} of ${rows.length} steps missing</span>`}</summary><table>${rows.map((r) => r.html).join("")}</table></details>
+        ${complete ? `
+          <div class="box final"><p><b>All done! Last steps:</b></p><ol>
+            <li><b>Download your data</b> with the button below.</li>
+            <li><b>Note where it's saved</b> — normally your Downloads folder. You'll need to find this file in a moment.</li>
+            ${was.length ? `<li><b>Restore your ChatGPT settings</b> (optional). Before the study, ${joinList(was)}.
+              <br><button data-act="restore">Restore my original settings</button></li>` : ""}
+            <li><b>Close this panel</b> (✕ top right) and <b>go back to the Prolific survey</b>, which tells you how to upload the file.</li>
+          </ol></div>` : `<p class="bad">Some steps are missing — go Back to finish them.</p>`}
         <p><button id="dl" class="primary" ${complete ? "" : "disabled"}>Download my data</button> ${act("preview", "Preview")}</p>
+        <p id="saved" class="ok" hidden></p>
         <pre id="json" hidden></pre>
         <details class="manual"><summary>Withdraw</summary><p>This permanently deletes everything this helper stored in your browser.</p><p>${act("wipe", "Delete my data")}</p></details>`;
     },
@@ -496,12 +567,20 @@ const VIEWS = {
         await save();
         const a = document.createElement("a");
         a.href = URL.createObjectURL(new Blob([JSON.stringify(D(), null, 2)], { type: "application/json" }));
-        a.download = `piw_${D().participant_id.replace(/\W+/g, "_")}_${D().completed_at.slice(0, 10)}.json`;
+        a.download = `piw_${(D().participant_id || "participant").replace(/\W+/g, "_")}_${D().completed_at.slice(0, 10)}.json`;
         a.click();
+        $("#saved").hidden = false;
+        $("#saved").textContent = `✓ Downloaded ${a.download}`;
       };
     },
     actions: {
       preview: () => { const p = $("#json"); p.hidden = !p.hidden; p.textContent = JSON.stringify(D(), null, 2); },
+      restore: async () => {
+        await ensureSettingsPage();
+        const init = D().settings.initial;
+        for (const [key, k] of [["memory", "memory_enabled"], ["web", "web_search"]]) if (init[k] != null) await run("setToggle", key, init[k]);
+        setErrors(["Your original settings are back."]);
+      },
       wipe: () => startOver("Delete all study data stored by this extension?"),
     },
   },
@@ -523,10 +602,9 @@ function setupTasks() {
 
 async function saveSettings({ observed, memSelf, webSelf }, rerender = true) {
   const d = D();
-  d.settings ||= { memory_enabled: { observed: null, self_report: null }, web_search: { observed: null, self_report: null }, flags: [] };
+  d.settings ||= { memory_enabled: { observed: null, self_report: null }, web_search: { observed: null, self_report: null }, initial: {}, flags: [] };
   if (observed) {
-    if (observed.memory_enabled != null) d.settings.memory_enabled.observed = observed.memory_enabled;
-    if (observed.web_search != null) d.settings.web_search.observed = observed.web_search;
+    for (const k of ["memory_enabled", "web_search"]) if (observed[k] != null) { d.settings[k].observed = observed[k]; d.settings.initial[k] ??= observed[k]; }
     d.settings.observed_at = now();
   }
   if (memSelf !== undefined) d.settings.memory_enabled.self_report = memSelf;
@@ -536,12 +614,12 @@ async function saveSettings({ observed, memSelf, webSelf }, rerender = true) {
   if (rerender) render();
 }
 
-const openSettings = async () => { if (!(await chatTab())?.url.includes("/settings/personalization")) await openChat(SETTINGS_URL); };
-
+// Opens the settings page and records the toggles as found there (the first reading is kept as `initial`).
 async function ensureSettingsPage() {
-  await openSettings();
-  const r = await until(() => run("readSettings"), (v) => v?.on_page, 8000);
+  if (!(await chatTab())?.url.includes("/settings/personalization")) await openChat(SETTINGS_URL);
+  const r = await until(() => run("readSettings", true), (v) => v?.memory_enabled != null && v?.web_search != null, 8000);
   if (!r?.on_page) throw new Error("Couldn't open the Personalization settings page.");
+  await saveSettings({ observed: r }, false);
 }
 
 async function toggle(key, want) {
@@ -585,14 +663,11 @@ async function insert(text) {
   if (r !== "ok") throw new Error("Couldn't insert the prompt. Use the copy button and paste it instead.");
 }
 
-function guessFollowup() {
-  const t = D().responses.traits?.response_text || "";
-  return /\bunknown\b|can['’]?t (determine|tell|guess|infer)|unable to|won['’]?t (guess|infer)|not able to/i.test(t);
-}
-
-// The follow-up chat's messages, or null if the page doesn't show a finished follow-up chat.
+// The follow-up chat's messages, or null if the page doesn't show a finished chat that starts with a follow-up prompt.
+// Matched by content, not URL: Temporary Chats can share a URL.
 function followupConversation(c) {
-  if (!c || c.generating || c.url === D().responses.traits?.conversation_url) return null;
+  const first = c?.messages.find((m) => m.role === "user");
+  if (!first || c.generating || !followupPrompts(ui.traits).some((p) => norm(p) === norm(first.text))) return null;
   return c.messages.some((m) => m.role === "assistant" && m.text) ? c.messages : null;
 }
 
@@ -604,19 +679,20 @@ function followupSteps() {
   if (!ui.traits.length) return `<p class="muted">Select the missing traits above to see the prompts.</p>`;
   const [p1, p2] = followupPrompts(ui.traits);
   return `
-    <p>3. ${act("p1", "Insert Prompt 1")} and press ${sendIcon(false)} to send it.</p>${promptBlock(p1)}
+    <p>3. ${act("p1", "Insert Prompt 1")} and press ${sendIcon(CHATS.regular)} to send it.</p>${promptBlock(p1)}
     <p>4. If ChatGPT still doesn't answer, ${act("p2", "insert Prompt 2")} in the same chat and send it. Then click Next.</p>${promptBlock(p2)}`;
 }
 
 // What this step requires of the current ChatGPT page. status: ok | bad | wait; each hint says how to fix it.
 function checks(conv, s) {
-  const { temporary } = s.capture;
+  const chat = chatFor(s);
   const users = conv.messages.filter((m) => m.role === "user"), bots = conv.messages.filter((m) => m.role === "assistant");
   const u = users[0], bot = bots[0], L = [];
   const add = (code, status, hint) => L.push({ code, status, hint });
-  const reopen = act("newchat", temporary ? "Open a new Temporary Chat" : "Open a new chat");
+  const reopen = act("newchat", `Open a new ${chat.name}`);
 
-  add("temporary", conv.temporary === temporary ? "ok" : "bad", `${temporary ? "This isn't a Temporary Chat." : "This is a Temporary Chat; this prompt needs a regular one."} ${reopen}.`);
+  add("chat", chat.ok(conv) || ui.pickSelf ? "ok" : "bad", chat.pick === undefined ? `Wrong kind of chat for this prompt. ${reopen}.`
+    : `Couldn't confirm <b>${chat.pick ? "Personalized" : "Unpersonalized"}</b> is selected. ${reopen}, or tick step 2 yourself if it is.`);
   const reused = conv.url.includes("/c/") && Object.entries(D().responses).some(([id, r]) => id !== s.id && r.conversation_url === conv.url);
   add("new_chat", !u ? "wait" : users.length === 1 && bots.length <= 1 && !reused ? "ok" : "bad",
     !u ? `${act("insert", "Insert the prompt")} and send it.` : `This chat was already used. ${reopen}.`);
@@ -626,7 +702,7 @@ function checks(conv, s) {
   return L;
 }
 
-// Called once every blocking check passes, so the only possible flag is web_links.
+// Called once every blocking check passes, so the only possible flags are web_links and a self-reported dropdown choice.
 async function saveCapture(s, conv) {
   const u = conv.messages.find((m) => m.role === "user"), bot = conv.messages.find((m) => m.role === "assistant");
   await setRecord(s, {
@@ -637,8 +713,9 @@ async function saveCapture(s, conv) {
     model_slug: bot.model_slug,
     conversation_url: conv.url,
     temporary_chat_observed: conv.temporary,
+    personalized_observed: conv.personalized,
     web_links_in_response: bot.link_count,
-    flags: bot.link_count ? ["web_links"] : [],
+    flags: [...(bot.link_count ? ["web_links"] : []), ...(chatFor(s).ok(conv) ? [] : ["dropdown_self_reported"])],
     source: "auto",
     captured_at: now(),
   });
@@ -658,19 +735,54 @@ $("#next").onclick = async () => {
   try { errors = await view(step()).next?.(step()); }
   catch (e) { errors = [esc(e.message)]; }
   finally { busy--; checking = false; next.disabled = false; next.textContent = label; }
-  if (errors?.length) { setErrors(errors); refreshBanner(); }
-  else go(1);
+  if (errors?.length) {
+    setErrors(errors);
+    refreshBanner();
+    return;
+  }
+  go(1);
+  // Within a part, saving a prompt opens a new chat for the next one.
+  const s = step();
+  if (s.capture?.item > 0 && !getRecord(s)) $('#view [data-act="newchat"]').click();
 };
 async function startOver(question) {
   if (!confirm(question)) return;
   await chrome.storage.local.clear();
-  state = { step: 0, data: newData() };
+  state = { step: 0, data: newData(), zoom: state.zoom };
   ui = freshUi();
   render();
 }
 
+function setZoom(z) {
+  state.zoom = Math.round(Math.min(1.6, Math.max(0.7, z)) * 10) / 10;
+  document.documentElement.style.setProperty("--zoom", state.zoom);
+  save();
+}
+
 $("#restart").onclick = () => startOver("Start over from the beginning? This deletes everything collected so far.");
 $("#close").onclick = () => window.close();
+// Clicking a screenshot or video shows it over the whole panel; pinch or Ctrl+scroll zooms it; a click closes it.
+let lightboxScale = 1;
+$("#view").addEventListener("click", (e) => {
+  if (!e.target.matches("img, video")) return;
+  lightboxScale = 1;
+  $("#lightbox .stage").replaceChildren(e.target.cloneNode());
+  $("#lightbox").hidden = false;
+});
+$("#lightbox").onclick = () => ($("#lightbox").hidden = true);
+$("#lightbox").addEventListener("wheel", (e) => {
+  if (!e.ctrlKey) return; // plain scrolling pans
+  e.preventDefault();
+  const box = $("#lightbox .stage"), el = box.firstChild, before = el.getBoundingClientRect();
+  lightboxScale = Math.min(6, Math.max(1, lightboxScale * Math.exp(-e.deltaY / 100)));
+  el.style.maxWidth = el.style.maxHeight = lightboxScale > 1 ? "none" : "";
+  el.style.width = lightboxScale > 1 ? `${lightboxScale * (box.clientWidth - 16)}px` : "";
+  const after = el.getBoundingClientRect(); // keep the point under the cursor in place
+  box.scrollLeft += after.left + ((e.clientX - before.left) / before.width) * after.width - e.clientX;
+  box.scrollTop += after.top + ((e.clientY - before.top) / before.height) * after.height - e.clientY;
+}, { passive: false });
+$("#zoom-in").onclick = () => setZoom(state.zoom + 0.1);
+$("#zoom-out").onclick = () => setZoom(state.zoom - 0.1);
 $("#goto-chatgpt").onclick = async (e) => {
   e.preventDefault();
   const [tab] = await chrome.tabs.query({ url: CHATGPT + "*", currentWindow: true });
@@ -680,6 +792,7 @@ $("#goto-chatgpt").onclick = async (e) => {
 chrome.tabs.onActivated.addListener(refreshBanner);
 chrome.tabs.onUpdated.addListener(refreshBanner);
 chrome.storage.local.get("piw").then(({ piw }) => {
-  state = piw?.data?.schema_version === 4 ? piw : { step: 0, data: newData() };
+  state = piw?.data?.schema_version === 5 ? piw : { step: 0, data: newData() };
+  setZoom(state.zoom ?? 1);
   render();
 });

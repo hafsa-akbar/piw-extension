@@ -2,9 +2,10 @@
 // The prompt battery is not in the extension: it is sampled from the dataset CSVs in the public GitHub repo below,
 // so prompts and datasets can change without publishing a new extension version.
 
-// battery.json at the repo root picks the datasets and their order: {"datasets": ["sbb", …]}, each name being a file
-// in datasets/. Without battery.json, every .csv in datasets/ is used, in alphabetical order. One prompt is drawn from
-// each dataset. Each CSV needs `prompt_id` and `prompt` columns. Rows with `option_1`, `option_2`, … columns also get a
+// battery.json at the repo root picks the datasets and their order: {"datasets": ["sbb", {"moral_judgment": ["aita_001", …]}, …]},
+// each name being a file in datasets/; a name with a list of prompt_ids draws only from those rows. Without battery.json,
+// every .csv in datasets/ is used, in alphabetical order. One prompt is drawn from each dataset.
+// Each CSV needs `prompt_id` and `prompt` columns. Rows with `option_1`, `option_2`, … columns also get a
 // ranking question before the prompt (text from an optional `ranking_question` column, else built from `scenario`).
 const REPO_RAW = "https://raw.githubusercontent.com/hafsa-akbar/llm-personalization-ecological-validity/main/";
 const DATASETS_API = "https://api.github.com/repos/hafsa-akbar/llm-personalization-ecological-validity/contents/datasets";
@@ -45,25 +46,25 @@ function followupPrompts(traits) {
 
 const PLAN_OPTIONS = ["Free", "Go", "Plus", "Pro", "Team", "Other"];
 
-// Temporary Chat = unpersonalized (P−); a regular chat with memory on = personalized (P+).
+// P− = unpersonalized, P+ = personalized. Which chat each uses depends on the account: see CHATS in sidepanel.js.
 const PARTS = [
-  { label: "P-", temporary: true, name: "Temporary Chat" },
-  { label: "P+", temporary: false, name: "Regular chat" },
+  { label: "P-", personalized: false, name: "Unpersonalized" },
+  { label: "P+", personalized: true, name: "Personalized" },
 ];
 
-// Step list for a sampled battery: profile card (+ optional follow-up) first, then all prompts in Temporary Chat, then all in regular chats.
+// Step list for a sampled battery: profile card (+ optional follow-up) first, then all prompts unpersonalized, then all personalized.
 function buildSteps(items = []) {
   return [
     { id: "consent", title: "Consent" },
     { id: "account", title: "Your ChatGPT plan" },
     { id: "setup", title: "ChatGPT settings & memory" },
-    { id: "traits", title: "What ChatGPT knows about you", capture: { prompt: "traits", temporary: false } },
+    { id: "traits", title: "What ChatGPT knows about you", capture: { prompt: "traits" } },
     { id: "followup", title: "Follow-up (optional)" },
     ...PARTS.flatMap((part, p) => [
       { id: `intro_${part.label}`, title: `Part ${p + 1}: ${part.name}`, part },
       ...items.flatMap((it, i) => [
-        ...(part.temporary && it.options ? [{ id: `rank_${it.prompt_id}`, title: "Your own priorities", rank: i }] : []),
-        { id: `${it.prompt_id}_${part.label}`, title: `${part.name} · Prompt ${i + 1} of ${items.length}`, capture: { item: i, temporary: part.temporary, condition: part.label } },
+        ...(!part.personalized && it.options ? [{ id: `rank_${it.prompt_id}`, title: "Your own priorities", rank: i }] : []),
+        { id: `${it.prompt_id}_${part.label}`, title: `${part.name} · Prompt ${i + 1} of ${items.length}`, capture: { item: i, personalized: part.personalized, condition: part.label } },
       ]),
     ]),
     { id: "review", title: "Review & export" },
@@ -74,7 +75,11 @@ function buildSteps(items = []) {
 async function datasetFiles(get) {
   const res = await fetch(REPO_RAW + "battery.json", { cache: "no-store" });
   if (res.ok) {
-    const files = (await res.json()).datasets.map((d) => d.replace(/\.csv$/, "") + ".csv").map((name) => ({ name, url: REPO_RAW + "datasets/" + name }));
+    const files = (await res.json()).datasets.map((d) => {
+      const [dataset, ids] = typeof d === "string" ? [d] : Object.entries(d)[0];
+      const name = dataset.replace(/\.csv$/, "") + ".csv";
+      return { name, url: REPO_RAW + "datasets/" + name, ids };
+    });
     return { source: REPO_RAW + "battery.json", files };
   }
   if (res.status !== 404) throw new Error(`battery.json → HTTP ${res.status}`);
@@ -93,7 +98,7 @@ async function sampleBattery() {
   if (!files.length) throw new Error("no datasets to sample from");
   const items = [];
   for (const file of files) {
-    const rows = parseCSV(await (await get(file.url)).text()).filter((r) => r.prompt_id && r.prompt?.trim());
+    const rows = parseCSV(await (await get(file.url)).text()).filter((r) => r.prompt_id && r.prompt?.trim() && (!file.ids || file.ids.includes(r.prompt_id)));
     if (!rows.length) throw new Error(`${file.name} has no prompts`);
     const row = rows[crypto.getRandomValues(new Uint32Array(1))[0] % rows.length];
     const options = Object.keys(row).filter((k) => /^option_\d+$/.test(k) && row[k].trim()).sort((a, b) => a.slice(7) - b.slice(7)).map((k) => row[k].trim());

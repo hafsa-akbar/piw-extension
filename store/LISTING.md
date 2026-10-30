@@ -19,7 +19,7 @@
 
 **Category:** Education (or Tools)
 **Language:** English
-**Icon:** `icons/icon128.png` (already in the package)
+**Store icon:** `store/store-icon-128.png` (128×128 with 16 px transparent padding, per the Store image guidelines)
 **Screenshots:** `store/screenshot-1.png`, `store/screenshot-2.png`, `store/screenshot-3.png` (1280×800)
 **Small promo tile:** `store/promo-small-440x280.png`
 
@@ -47,7 +47,7 @@
 **Certify all three:** not sold to third parties; not used or transferred for purposes unrelated to the single purpose;
 not used to determine creditworthiness or for lending.
 
-**Privacy policy URL:** `https://github.com/<your-username>/<repo-name>/blob/main/PRIVACY.md`
+**Privacy policy URL:** `https://github.com/hafsa-akbar/piw-extension/blob/main/PRIVACY.md`
 
 ## Distribution tab
 

@@ -3,6 +3,7 @@
   :root { --fg: #eee; --muted: #a5a5a5; --line: #3a3a3a; --bg: #1e1e1e; --soft: #2a2a2a; --ok: #5fc27e; --warn: #f0b04a; --bad: #f28b82; --accent: #e07a96; --banner: #4a3b12; }
 }
 body { margin: 0; font: 14px/1.5 system-ui, sans-serif; color: var(--fg); background: var(--bg); display: flex; flex-direction: column; height: 100vh; }
+#banner, main, #errors { zoom: var(--zoom, 1); }
 .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 header { padding: 10px 14px 0; border-bottom: 1px solid var(--line); }
 header .row { color: var(--muted); font-size: 12px; }
@@ -19,7 +20,7 @@ a, .act { color: var(--accent); font-weight: 600; cursor: pointer; text-decorati
 button { font: inherit; padding: 6px 14px; border: 1px solid var(--line); border-radius: 6px; background: var(--soft); color: var(--fg); cursor: pointer; }
 button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 button:disabled { opacity: .5; cursor: default; }
-button.icon { border: 0; background: none; padding: 0 2px; margin-left: 8px; font-size: 14px; line-height: 0; color: var(--muted); }
+button.icon { border: 0; background: none; padding: 0 2px; margin-left: 8px; font-size: 14px; line-height: 1; color: var(--muted); }
 button.icon:hover { color: var(--fg); }
 .brand { display: flex; align-items: center; gap: 6px; }
 .brand button.icon { margin-left: 0; }
@@ -37,19 +38,35 @@ textarea { width: 100%; box-sizing: border-box; min-height: 90px; }
 input[type=text], select { font: inherit; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); width: 100%; box-sizing: border-box; }
 label.check { display: flex; gap: 8px; align-items: flex-start; margin: 6px 0; }
 .box { border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin: 10px 0; }
+.box.final { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.box.final ol { padding-left: 20px; margin: 0; } .box.final li { margin: 4px 0; } .box.final button { margin-top: 6px; }
+.cue { display: inline-block; margin-left: 10px; font-size: 12px; color: var(--muted); white-space: nowrap; animation: nudge .6s ease-in-out infinite alternate; }
+@keyframes nudge { from { transform: translateX(-4px); } }
 details.manual { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 8px; font-size: 13px; }
 details.manual summary { color: var(--muted); cursor: pointer; }
+details.help { margin: 4px 0 10px; font-size: 12px; } details.help summary { color: var(--accent); cursor: pointer; } details.help ol { margin: 4px 0; padding-left: 18px; }
 .consent { font-size: 13px; } .consent ul { padding-left: 18px; margin: 4px 0 10px; } .consent h3 { font-size: 13px; margin: 12px 0 2px; }
 ol.rank { padding-left: 22px; }
 ol.rank li { margin: 5px 0; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft); cursor: grab; user-select: none; }
 ol.rank li.dragging { opacity: .4; }
 ol.rank .grip { color: var(--muted); margin-right: 8px; letter-spacing: -2px; }
+details.checklist summary { cursor: pointer; margin: 4px 0; }
 table { border-collapse: collapse; width: 100%; font-size: 12px; } td { border-bottom: 1px solid var(--line); padding: 4px 2px; vertical-align: top; }
 .stepline { display: flex; align-items: flex-start; gap: 6px; margin: 8px 0; } .stepline > div { flex: 1; min-width: 0; }
 .stepline label.check { margin: 0; }
 details.where { margin: 2px 0 0 26px; font-size: 12px; } details.where summary { color: var(--accent); cursor: pointer; }
-details.where img, details.where video, img.shot { width: 100%; box-sizing: border-box; border: 1px solid var(--line); border-radius: 8px; margin-top: 6px; }
-img.send { width: 20px; height: 20px; vertical-align: -5px; }
+#view img, #view video { cursor: zoom-in; }
+#lightbox { position: fixed; inset: 0; z-index: 10; background: rgb(0 0 0 / .93); backdrop-filter: blur(8px); cursor: zoom-out; }
+#lightbox[hidden] { display: none; }
+#lightbox .stage { position: absolute; inset: 0; display: flex; overflow: auto; padding: 8px; }
+#lightbox .stage > * { margin: auto; max-width: 100%; max-height: 100%; border-radius: 8px; }
+#lightbox .hint { position: absolute; bottom: 10px; left: 0; right: 0; text-align: center; font-size: 11px; color: #bbb; pointer-events: none; }
+details.where img, details.where video, .shot { width: 100%; box-sizing: border-box; border: 1px solid var(--line); border-radius: 8px; margin-top: 6px; }
+.titlebar { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.zoom { display: flex; flex: none; align-items: center; gap: 2px; font-size: 11px; color: var(--muted); }
+.zoom button { border: 0; background: none; color: inherit; padding: 2px 6px; font-size: 14px; line-height: 1; }
+.zoom button:hover { color: var(--fg); }
+.send { width: 20px; height: 20px; vertical-align: -5px; }
 details.dropdown { border: 1px solid var(--line); border-radius: 6px; margin: 6px 0; }
 details.dropdown summary { padding: 5px 8px; cursor: pointer; }
 details.dropdown .menu { border-top: 1px solid var(--line); padding: 2px 8px; }

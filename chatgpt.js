@@ -43,6 +43,7 @@ globalThis.PIW = {
     return {
       url: url.origin + url.pathname + url.search,
       temporary: url.searchParams.get("temporary-chat") === "true",
+      personalized: url.searchParams.get("temporary-chat") === "true" ? this.readPersonalized() : null,
       generating: !!document.querySelector(`${S.stop}, ${S.unfinishedTurn}`),
       messages,
     };
@@ -93,6 +94,49 @@ globalThis.PIW = {
     selectAll();
     document.execCommand("insertText", false, text);
     return has() ? "ok" : "failed";
+  },
+
+  // ---------- Personalized / Unpersonalized dropdown (top right of a Temporary Chat, on accounts that have it) ----------
+
+  personalizedButton() {
+    return [...document.querySelectorAll("button")].find((b) => this.visible(b) && /^(un)?personalized$/i.test(this.norm(b.innerText))) || null;
+  },
+
+  // true/false = Personalized/Unpersonalized; null = new chat without the dropdown. The dropdown disappears once a
+  // message is sent; after that the user's bubble is blue when personalized and gray when not.
+  readPersonalized() {
+    const btn = this.personalizedButton();
+    if (btn) return /^personalized$/i.test(this.norm(btn.innerText));
+    const user = this.findMessages().find(([role]) => role === "user")?.[1];
+    return user ? this.isBlue(user.querySelector(this.SEL.userBubble) || user) : null;
+  },
+
+  // Whether the first opaque background in `el` (itself or a descendant) is blue rather than gray.
+  isBlue(el) {
+    const bg = [el, ...el.querySelectorAll("*")].map((e) => getComputedStyle(e).backgroundColor).find((c) => !/transparent|, 0\)$/.test(c));
+    if (!bg) return false;
+    const [r, , b] = bg.match(/[\d.]+/g).map(Number);
+    return b - r > 20;
+  },
+
+  // ChatGPT's menus open on a pointer press, not a plain click; menu items may have a description under the label.
+  async setPersonalized(want) {
+    const btn = this.personalizedButton();
+    if (!btn) return null;
+    if (this.readPersonalized() !== want) {
+      this.press(btn);
+      await this.sleep(400);
+      const label = want ? /^personalized\b/i : /^unpersonalized\b/i;
+      const item = [...document.querySelectorAll('[role^="menuitem"], [role="option"]')].find((el) => this.visible(el) && label.test(this.norm(el.innerText)));
+      if (item) this.press(item);
+      await this.sleep(400);
+    }
+    return this.readPersonalized();
+  },
+
+  press(el) {
+    for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup"]) el.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, button: 0, pointerType: "mouse" }));
+    el.click();
   },
 
   // ---------- Personalization settings ----------
@@ -189,6 +233,9 @@ globalThis.PIW = {
       turns: count(this.SEL.messageFallback),
       composers: [...document.querySelectorAll(this.SEL.composer)].map((e) => `${e.tagName}#${e.id}.${e.className}`.slice(0, 80) + (this.visible(e) ? " (visible)" : "")),
       switches: this.switchRows().map((r) => `${r.label.slice(0, 50)} = ${r.on}`),
+      personalized: this.readPersonalized(),
+      personalized_button: this.outline(this.personalizedButton()),
+      menu_items: [...document.querySelectorAll('[role^="menuitem"], [role="option"]')].map((el) => `${el.getAttribute("role")}: ${this.norm(el.innerText).slice(0, 40)}`),
       dialogs: count('[role="dialog"]'),
       stop_button: count(this.SEL.stop),
       turns_found: this.findMessages().map(([role]) => role),
