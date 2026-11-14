@@ -6,7 +6,7 @@ Usage: pip install playwright && python3 -m playwright install chromium
        python3 scripts/test_e2e.py [--battery] [--toggle]
 --toggle simulates an account with the Personalized/Unpersonalized dropdown in Temporary Chats.
 """
-import csv, html, io, json, re, sys, tempfile
+import csv, html, io, json, re, subprocess, sys, tempfile
 from pathlib import Path
 from playwright.sync_api import sync_playwright, expect
 
@@ -14,7 +14,7 @@ EXT = str(Path(__file__).resolve().parent.parent)
 
 RAW = "https://raw.githubusercontent.com/hafsa-akbar/llm-personalization-ecological-validity/main/datasets/"
 API = "https://api.github.com/repos/hafsa-akbar/llm-personalization-ecological-validity/contents/datasets"
-BATTERY = {"datasets": ["sbb", {"moral_judgment": ["aita_002", "aita_005"]}, "information_prioritization"]} if "--battery" in sys.argv else None
+BATTERY = "--battery" in sys.argv  # becomes a battery.json pinning one dataset to two of its prompt_ids
 TOGGLE = "--toggle" in sys.argv
 
 S = {"page": "composer", "mem": False, "web": True, "pz": "Unpersonalized"}  # what the fake chatgpt.com serves / has saved
@@ -47,9 +47,11 @@ def settings_html():
       <button id="more">Additional ChatGPT settings</button><div id="extra"></div>
       <button id="save" disabled>Save</button></main>
     <script>
-      const flip = (b) => {{ b.setAttribute('aria-checked', b.getAttribute('aria-checked') === 'true' ? 'false' : 'true'); save.disabled = false; }};
-      more.onclick = () => {{ extra.innerHTML = '<div><span>Web search</span><button role="switch" aria-checked="{str(S['web']).lower()}" onclick="flip(this)"></button></div>'; }};
-      save.onclick = () => fetch('/save', {{ method: 'POST', body: JSON.stringify([...document.querySelectorAll('[role=switch]')].map(s => [s.parentElement.innerText, s.getAttribute('aria-checked')])) }});
+      let webOn = {str(S['web']).lower()};
+      const flip = (b) => {{ b.setAttribute('aria-checked', b.getAttribute('aria-checked') === 'true' ? 'false' : 'true'); if (b.closest('#extra')) webOn = b.getAttribute('aria-checked') === 'true'; save.disabled = false; }};
+      // Like ChatGPT: the expander opens on a pointer press (a plain click does nothing), and Save re-renders the page, collapsing it again.
+      more.onpointerdown = () => {{ extra.innerHTML = '<div><span>Web search</span><button role="switch" aria-checked="' + webOn + '" onclick="flip(this)"></button></div>'; }};
+      save.onclick = () => {{ const body = JSON.stringify([...document.querySelectorAll('[role=switch]')].map(s => [s.parentElement.innerText, s.getAttribute('aria-checked')])); fetch('/save', {{ method: 'POST', body }}); extra.innerHTML = ''; }};
       manage.onclick = () => setTimeout(() => document.body.insertAdjacentHTML('beforeend',
         '<div role="dialog"><h2>Memory overview</h2><p>Lives in Boston.</p><p>Likes cats.</p><h3>Dive Deeper</h3><p>Other stuff</p></div>'), 1500);
     </script>"""
@@ -58,15 +60,19 @@ BUBBLE = lambda: f'style="background: {"rgb(33, 61, 110)" if S["pz"] == "Persona
 
 def conv_html():
     sidebar = f'<nav aria-label="Chat history"><a href="/c/abc"><span>{html.escape(S["user"][:60])}</span></a></nav>'
-    if S.get("markup") is None:  # ChatGPT's 2026 layout, copied from a real page's structure
+    if S.get("markup") is None:  # ChatGPT's 2026 layout, copied from a real page's structure; a second turn when user2 is set
+        def turn(n, user, reply, state, links=""):
+            return (f'<div data-turn-key="m{n + 1}"><div data-content-search-turn-key="fallback-turn-{n}">'
+                    f'<div class="group flex flex-col" data-talvt-turn-state="{state}">'
+                    f'<div data-chatgpt-search-unit-key="fallback-turn-{n}:0:user"><div data-user-message-bubble="true" class="bg-user-message" {BUBBLE()}>'
+                    f'<div class="overflow-hidden" style="max-height:3lh"><div><div class="text-size-chat whitespace-pre-wrap" style="white-space:pre-wrap">{html.escape(user)}</div></div></div>'
+                    f'<button>Show more</button></div></div>'
+                    f'<div data-chatgpt-search-unit-key="fallback-turn-{n}:1:assistant"><div class="markdown"><p>{reply}</p>{links}</div></div>'
+                    f'</div></div></div>')
         state = "streaming" if S.get("generating") else "complete"
-        return (f'{sidebar}<main><div role="region" aria-label="Conversation"><div data-turn-key="m1"><div data-content-search-turn-key="fallback-turn-0">'
-                f'<div class="group flex flex-col" data-talvt-turn-state="{state}">'
-                f'<div data-chatgpt-search-unit-key="fallback-turn-0:0:user"><div data-user-message-bubble="true" class="bg-user-message" {BUBBLE()}>'
-                f'<div class="overflow-hidden" style="max-height:3lh"><div><div class="text-size-chat whitespace-pre-wrap" style="white-space:pre-wrap">{html.escape(S["user"])}</div></div></div>'
-                f'<button>Show more</button></div></div>'
-                f'<div data-chatgpt-search-unit-key="fallback-turn-0:1:assistant"><div class="markdown"><p>{S["reply"]}</p>{S.get("links", "")}</div></div>'
-                f'</div></div></div></div></main>')
+        turns = turn(0, S["user"], S["reply"], "complete" if S.get("user2") else state, S.get("links", ""))
+        if S.get("user2"): turns += turn(1, S["user2"], S["reply2"], state)
+        return f'{sidebar}<main><div role="region" aria-label="Conversation">{turns}</div></main>{COMPOSER}'  # real conversation pages keep a composer
     if S.get("markup") == "turns":  # no data-message-author-role: only turn containers with screen-reader labels
         return (f'<main><article data-testid="conversation-turn-1"><h5 class="sr-only">You said:</h5><div {BUBBLE()}>{html.escape(S["user"])}</div></article>'
                 f'<article data-testid="conversation-turn-2"><h6 class="sr-only">ChatGPT said:</h6><div class="markdown"><p>{S["reply"]}</p></div></article></main>')
@@ -96,14 +102,31 @@ def ok(cond, msg):
     print(("PASS " if cond else "FAIL ") + msg)
     if not cond: sys.exit(1)
 
+ALLOC = {}  # the mocked allocator's category → prompt_id mapping (filled once the CSVs are read)
+def supa(r):
+    if r.request.url.endswith("/allocate"):
+        if S.get("alloc_fail"): return r.fulfill(status=500, json={"error": "boom"})
+        S["alloc_pid"] = json.loads(r.request.post_data)["participant_key"]
+        return r.fulfill(json={"stage_id": "pilot_60", "assignments": ALLOC, "exhausted": [], "existing": False})
+    S["submitted"] = json.loads(r.request.post_data); S["submits"] = S.get("submits", 0) + 1
+    r.fulfill(json={"updated": len(ALLOC), "total": len(ALLOC)})
+
 with sync_playwright() as pw:
     http = pw.request.new_context()
     get = lambda url: http.get(url).text().lstrip("\ufeff")
     CSVS = sorted(f["name"] for f in json.loads(get(API)) if f["name"].endswith(".csv"))
+    PINNED = CSVS[0][:-4]  # a dataset that exists right now, read from the repo listing
+    if BATTERY:  # limit that dataset to two of its current prompt_ids
+        IDS = [r["prompt_id"] for r in csv.DictReader(io.StringIO(get(f"{RAW}{PINNED}.csv")))][:2]
+        BATTERY = {"datasets": ["sbb", {PINNED: IDS}, "value_alignment"]}
     ctx = pw.chromium.launch_persistent_context(tempfile.mkdtemp(), headless=True, channel="chromium",
         args=[f"--disable-extensions-except={EXT}", f"--load-extension={EXT}"])
     ctx.route("https://chatgpt.com/**", route)
     ctx.route("https://raw.githubusercontent.com/**/battery.json", route)
+    ctx.route("https://frgzptcagazvqrfaxeuz.supabase.co/**", supa)
+    for name in (["sbb.csv", f"{PINNED}.csv", "value_alignment.csv"] if BATTERY else CSVS):  # allocate the last eligible prompt of each dataset
+        ids_ = IDS if BATTERY and name == f"{PINNED}.csv" else [r_["prompt_id"] for r_ in csv.DictReader(io.StringIO(get(RAW + name))) if r_.get("prompt", "").strip()]
+        ALLOC[name[:-4]] = ids_[-1]
     sw = ctx.service_workers[0] if ctx.service_workers else ctx.wait_for_event("serviceworker")
     sp = ctx.new_page(); sp.goto(f"chrome-extension://{sw.url.split('/')[2]}/sidepanel.html")
     chat = ctx.new_page(); chat.goto("https://chatgpt.com/")
@@ -118,17 +141,28 @@ with sync_playwright() as pw:
     same = lambda a, b: re.sub(r"\s+", " ", a).strip() == re.sub(r"\s+", " ", b).strip()
     purl = lambda p: f"https://chatgpt.com/c/{p}" + ("?temporary-chat=true" if TOGGLE else "")  # a personalized conversation's URL
 
-    # Consent: Next explains what's missing, then samples the battery from the dataset CSVs
-    nxt.click(); expect(err).to_contain_text("Tick both boxes")  # the Prolific ID is optional
-    sp.fill("#pid", "TEST123"); sp.check("#age"); sp.check("#agree"); nxt.click()
+    # Consent: Next explains what's missing; prompts come from the allocator, never a local fallback
+    nxt.click(); expect(err).to_contain_text("Tick both boxes")  # the Prolific ID stays optional
+    sp.check("#age"); sp.check("#agree"); S["alloc_fail"] = True; nxt.click()  # an empty PID is fine; the allocator is what fails here
+    expect(err).to_contain_text("assignment", timeout=10000)
+    ok(sp.evaluate("chrome.storage.local.get('piw').then(x => x.piw?.data.battery ?? null)") is None, "failed allocation leaves no untracked local battery")
+    sp.fill("#pid", "TEST123"); S["alloc_fail"] = False; nxt.click()
     expect(title).to_have_text("Your ChatGPT plan", timeout=10000)
+    KEY = sp.evaluate("chrome.storage.local.get('piw').then(x => x.piw.data.participant_key)")
+    ok(S.get("alloc_pid") == KEY and re.fullmatch(r"[0-9a-f-]{36}", KEY or "") and KEY != "TEST123", "allocator receives a generated key, never the Prolific ID")
     items = sp.evaluate("chrome.storage.local.get('piw').then(x => x.piw.data.battery.items)")
-    ok([i["dataset"] for i in items] == (["sbb", "moral_judgment", "information_prioritization"] if BATTERY else [d[:-4] for d in CSVS]), "one prompt sampled per dataset, in order")
-    if BATTERY: ok(items[1]["prompt_id"] in ("aita_002", "aita_005"), "a dataset with a prompt_id list is sampled only from that list")
+    ok([i["dataset"] for i in items] == (["sbb", PINNED, "value_alignment"] if BATTERY else [d[:-4] for d in CSVS]), "one prompt sampled per dataset, in order")
+    if BATTERY: ok(items[1]["prompt_id"] in IDS, "a dataset with a prompt_id list is sampled only from that list")
     I = {i["dataset"]: n for n, i in enumerate(items)}
     rows = {d: {r["prompt_id"]: r for r in csv.DictReader(io.StringIO(get(f"{RAW}{d}.csv")))} for d in [i["dataset"] for i in items]}
-    ok(all(rows[i["dataset"]][i["prompt_id"]]["prompt"].strip() == i["prompt"] for i in items), "sampled prompts match the CSV rows exactly")
-    ok([i["dataset"] for i in items if "options" in i] == ["information_prioritization"] and len(items[I["information_prioritization"]]["options"]) == 8, "ranking options only for the prioritization dataset")
+    row = lambda i: rows[i["dataset"]][i["prompt_id"]]
+    ok(all((row(i).get("prompt_short") or row(i)["prompt"]).strip() == i["prompt"] for i in items), "sampled prompts match the CSV rows exactly (prompt_short when present)")
+    ok([i["dataset"] for i in items if "choice" in i] == ["value_alignment"], "pick-one question only for the value_alignment dataset")
+    ok(all(i.get("follow_up") == ((row(i).get("follow_up") or "").strip() or None) for i in items), "follow_up carried from the CSV onto the sampled item")
+    ok(all(i["prompt_id"] == ALLOC[i["dataset"]] for i in items), "allocator drives prompt selection")
+    ca = items[I["value_alignment"]]["choice"]
+    ok([o["label"] for o in ca["options"]] == [chr(65 + j) for j in range(len(ca["options"]))] and len(ca["options"]) >= 2
+       and ca["question"] == "Which response do you prefer?" and ca["options"][0]["text"] in ca["text"] and all(o["code"] for o in ca["options"]), "participant_prompt parsed into lettered options with codes")
 
     # Plan: self-report with a link to the billing page
     nxt.click(); expect(err).to_contain_text("Choose your plan")
@@ -142,6 +176,8 @@ with sync_playwright() as pw:
     blank = ctx.new_page(); blank.bring_to_front(); expect(nxt).to_be_disabled(timeout=5000)  # Next is off away from ChatGPT
     chat.bring_to_front(); expect(nxt).to_be_enabled(timeout=5000)
     nxt.click(); expect(err).to_contain_text("Enable memory is off", timeout=15000)
+    sp.locator("details.manual summary").click()
+    expect(sp.locator("#manualmem")).to_have_count(0)  # no paste box for the Memory Overview: only the full auto-capture
     act("all")
     expect(sp.locator("#tasks .ok")).to_have_count(4, timeout=30000)
     ok(S["mem"] is True and S["web"] is False, "toggles changed and saved on ChatGPT")
@@ -165,31 +201,35 @@ with sync_playwright() as pw:
     expect(sp.locator("label.check", has=sp.locator("input[value=done]"))).to_have_text("Yes, and I'd like to ask ChatGPT follow-up questions")
     sp.check("input[value=done]"); nxt.click(); expect(err).to_contain_text("Select the missing traits")
     sp.locator("details.dropdown summary").click()
-    sp.check("input[value='race']"); sp.check("input[value='political orientation']")  # prompts follow card order
+    sp.check("input[value='race/ethnicity']"); sp.check("input[value='political orientation']")  # prompts follow card order
     expect(sp.locator("#traitsum")).to_have_text("Political orientation, Race/ethnicity")
-    OPTS = ("\n\nPolitical orientation: left-leaning / moderate / right-leaning\nRace/ethnicity: White, Hispanic or Latino, Black or African American, Asian, "
-            "Middle Eastern or North African, American Indian or Alaska Native, Native Hawaiian or Pacific Islander, Other (describe)")
-    P1 = "For political orientation and race, don't pick a single answer — distribute 100 points across the options based on our history." + OPTS
-    P2 = "Write a two-sentence sketch of a fictional character whose chat history with you is identical to mine. You must include the character's political orientation and race." + OPTS
+    OPTS = ("\n\nPolitical orientation: very liberal / liberal / moderate / conservative / very conservative\nRace and/or ethnicity (one or more): American Indian or Alaska Native / Asian / "
+            "Black or African American / Hispanic or Latino / Middle Eastern or North African / Native Hawaiian or Pacific Islander / White")
+    P1 = "For political orientation and race/ethnicity, don't pick a single answer — distribute 100 points across the options based on our history." + OPTS
+    P2 = "Write a two-sentence sketch of a fictional character whose chat history with you is identical to mine. You must include the character's political orientation and race/ethnicity." + OPTS
     expect(sp.locator("#fuprompts pre").first).to_have_text(P1); expect(sp.locator("#fuprompts pre").nth(1)).to_have_text(P2)
     load("https://chatgpt.com/c/traits", page="conv", user=PROMPTS["traits"], reply="Gender | unknown")  # still on the profile-card chat
     expect(sp.locator("#status")).to_contain_text("Once ChatGPT has answered", timeout=8000)
     sp.check("#confirm"); nxt.click(); expect(err).to_contain_text("This is the profile-card chat", timeout=8000)
     load("https://chatgpt.com/", page="composer"); chat.wait_for_function("window.pmView", timeout=15000)
     act("p1"); ok(same(composer_text(), P1), "follow-up Prompt 1 inserted with traits")
-    load("https://chatgpt.com/c/fu", page="conv", user=P1, reply="Left 60, moderate 30, right 10")
+    load("https://chatgpt.com/c/fu", page="conv", user=P1, reply="Liberal 60, moderate 30, conservative 10")
     expect(sp.locator("#status")).to_contain_text("Follow-up chat found", timeout=8000)
     sp.check("#confirm"); nxt.click()
 
-    # Part 1: every prompt unpersonalized, in a new Temporary Chat (ranking question first where the dataset has options)
+    # Part 1: every prompt unpersonalized, in a new Temporary Chat (pick-one question first where the dataset has one)
     WRONG_MINUS = ("Couldn't confirm Unpersonalized is selected. Open a new Unpersonalized Temporary Chat, or tick step 2 yourself if it is." if TOGGLE
                    else "Wrong kind of chat for this prompt. Open a new Temporary Chat.")
     expect(title).to_have_text("Part 1: Unpersonalized"); nxt.click()
     for i, it in enumerate(items):
-        if "options" in it:
-            expect(title).to_have_text("Your own priorities")
-            expect(main).to_contain_text(it["options"][0])
-            sp.bring_to_front(); sp.locator("ol.rank li").nth(0).drag_to(sp.locator("ol.rank li").nth(1)); nxt.click()
+        if "choice" in it:
+            expect(title).to_have_text("Your preference")
+            expect(main).to_contain_text("Please read the options carefully")
+            expect(main).to_contain_text(it["choice"]["options"][-1]["text"])
+            sp.bring_to_front(); nxt.click(); expect(err).to_contain_text("at least 1 minute")  # dwell gate before anything else
+            sp.evaluate("ui.choiceAt -= 60000")  # a minute passes
+            nxt.click(); expect(err).to_have_text("Pick one response.")
+            sp.locator("label.option").nth(1).click(); nxt.click()
         expect(title).to_have_text(f"Unpersonalized · Prompt {i + 1} of {len(items)}", timeout=8000)
         if i > 0:  # saving the previous prompt opened this one's chat
             expect(chat).to_have_url("https://chatgpt.com/?temporary-chat=true"); expect(sp.locator('[data-act="newchat"].busy')).to_have_count(0, timeout=15000)
@@ -211,6 +251,32 @@ with sync_playwright() as pw:
         if TOGGLE: expect(sp.locator("#pickbox")).to_be_checked(timeout=8000)
         if i == 0: expect(nxt).to_have_class(re.compile("ready"), timeout=8000); expect(sp.locator("#status")).to_contain_text("ChatGPT has responded")
         S["page"] = "composer"; nxt.click()
+        fu = (it.get("follow_up") or "").strip()
+        if fu:  # the follow-up continues in the same chat: no new-chat link or confirm box, wrong chat rejected, sent verbatim
+            expect(title).to_have_text(f"Unpersonalized · Prompt {i + 1} of {len(items)} — follow-up", timeout=8000)
+            expect(sp.locator('[data-act="newchat"]')).to_have_count(0); expect(sp.locator("#confirm")).to_have_count(0)
+            load("https://chatgpt.com/?temporary-chat=true", page="conv", user=fu, reply="wrong chat")
+            nxt.click(); expect(err).to_contain_text("isn't the chat where you sent the prompt", timeout=8000)
+            load("https://chatgpt.com/?temporary-chat=true", user=it["prompt"], reply=f"{i} P-")
+            act("insert"); ok(same(composer_text(), fu), "follow-up inserted verbatim into the same chat")
+            load("https://chatgpt.com/?temporary-chat=true", user2=fu, reply2=f"{i} fu P-", generating=True)
+            nxt.click(); expect(err).to_have_text("Waiting for ChatGPT to finish responding.", timeout=8000)
+            load("https://chatgpt.com/?temporary-chat=true", generating=False)
+            expect(nxt).to_have_class(re.compile("ready"), timeout=8000)
+            S.update(page="composer", user2=None); nxt.click()
+            # Discarding the main response also discards its follow-up record, then both are re-captured
+            expect(sp.locator('[data-act="newchat"].busy')).to_have_count(0, timeout=15000)
+            sp.click("#back"); sp.click("#back")
+            expect(title).to_have_text(f"Unpersonalized · Prompt {i + 1} of {len(items)}", timeout=8000)
+            act("redo"); expect(sp.locator('[data-act="redo"]')).to_have_count(0, timeout=8000)
+            ok(sp.evaluate(f"chrome.storage.local.get('piw').then(x => Object.keys(x.piw.data.responses).filter(k => k.startsWith('{it['prompt_id']}_')).length)") == 0,
+               "redo on the main response discards its follow-up record too")
+            load("https://chatgpt.com/?temporary-chat=true", page="conv", user=it["prompt"], reply=f"{i} P- redo")
+            sp.check("#confirm"); nxt.click()
+            expect(title).to_have_text(f"Unpersonalized · Prompt {i + 1} of {len(items)} — follow-up", timeout=8000)
+            load("https://chatgpt.com/?temporary-chat=true", user2=fu, reply2=f"{i} fu P-")
+            expect(nxt).to_have_class(re.compile("ready"), timeout=8000)
+            S.update(page="composer", user2=None); nxt.click()
 
     # Part 2: the same prompts personalized: a Temporary Chat with the dropdown on Personalized, or a regular chat
     expect(title).to_have_text("Part 2: Personalized", timeout=8000)
@@ -246,6 +312,12 @@ with sync_playwright() as pw:
             nxt.click(); expect(err).to_contain_text("This chat was already used", timeout=8000)
             sp.locator("details.manual summary").click(); sp.fill("#manualresp", "pasted answer"); nxt.click(); continue
         sp.check("#confirm"); S["page"] = "composer"; nxt.click()
+        fu = (it.get("follow_up") or "").strip()
+        if fu:
+            expect(title).to_have_text(f"Personalized · Prompt {i + 1} of {len(items)} — follow-up", timeout=8000)
+            load(purl(f"r{i}"), page="conv", user2=fu, reply2=f"{i} fu P+")
+            expect(nxt).to_have_class(re.compile("ready"), timeout=8000)
+            S.update(page="composer", user2=None); nxt.click()
     expect(title).to_have_text("Review & export", timeout=8000)
 
     # Not-on-ChatGPT banner
@@ -262,12 +334,16 @@ with sync_playwright() as pw:
     with sp.expect_download() as dl: sp.click("#dl")
     expect(sp.locator("#saved")).to_contain_text("Downloaded piw_TEST123_")
     data = json.load(open(dl.value.path()))
+    v = subprocess.run(["node", EXT + "/scripts/verify.js", str(dl.value.path())], capture_output=True, text=True)
+    ok(v.returncode == 0 and ": VALID" in v.stdout, "integrity signature verifies")
     R = data["responses"]
     ok(data["participant_id"] == "TEST123" and data["account"]["plan"] == "Go", "participant + plan")
     ok(data["settings"]["memory_enabled"]["observed"] is True and data["settings"]["web_search"]["observed"] is False, "settings observed")
     ok(data["settings"]["initial"] == {"memory_enabled": False, "web_search": True} and data["account"]["personalization_toggle"] == TOGGLE, "initial settings and dropdown presence recorded")
     ok(data["memory_overview"]["text"].endswith("Likes cats."), "memory overview captured above Dive Deeper")
-    ok(len(R) == 2 * len(items) + 1, f"{2 * len(items)} battery records + profile card")
+    n_fu = sum(1 for i_ in items if i_.get("follow_up"))
+    ok(n_fu == (0 if BATTERY else 1), "exactly the recommendation_steering item has a follow_up")
+    ok(len(R) == 2 * len(items) + 1 + 2 * n_fu, f"{2 * len(items)} battery records + profile card + {2 * n_fu} follow-up records")
     first = R[f"{items[0]['prompt_id']}_P-"]
     ok(first["condition"] == "P-" and first["temporary_chat_observed"] and first["personalized_observed"] is False and not first["flags"] and first["dataset"] == items[0]["dataset"], "P- record (unpersonalized)")
     ok(first["user_message_sent"] == items[0]["prompt"] and R["traits"]["user_message_sent"] == PROMPTS["traits"], "2026 layout: exact user text (no 'Show more', not the sidebar title)")
@@ -277,10 +353,23 @@ with sync_playwright() as pw:
     ok(R[f"{items[1]['prompt_id']}_P+"]["flags"] == ["web_links"], "links in a response are flagged")
     last = R[f"{items[-1]['prompt_id']}_P+"]
     ok(last["source"] == "manual_paste" and last["response_text"] == "pasted answer" and last["flags"] == ["manual_entry"], "pasted response saved on Next and flagged")
-    ix = items[I["information_prioritization"]]; rk = data["rankings"][ix["prompt_id"]]
-    ok(rk["order"][1] == ix["options"][0] and rk["question"].startswith("Imagine this situation"), "ranking saved with its question")
+    ix = items[I["value_alignment"]]; ch = data["choices"][ix["prompt_id"]]; B = ix["choice"]["options"][1]
+    ok(ch["choice"] == "B" and ch["text"] == B["text"] and ch["code"] == B["code"] and ch["question"].startswith("Imagine you asked"), "pick saved with its question and code")
+    if n_fu:
+        fit = next(i_ for i_ in items if i_.get("follow_up")); fi = items.index(fit)
+        fm, fr = R[f"{fit['prompt_id']}_P-"], R[f"{fit['prompt_id']}_P-_followup"]
+        ok(fr["condition"] == "P-" and fr["prompt"] == fit["follow_up"] and fr["user_message_sent"] == fit["follow_up"]
+           and fr["response_text"] == f"{fi} fu P-" and fr["conversation_url"] == fm["conversation_url"], "P- follow-up record in the same conversation")
+        ok(R[f"{fit['prompt_id']}_P+_followup"]["response_text"] == f"{fi} fu P+", "P+ follow-up record")
     f = data["followup"]
-    ok(f["source"] == "auto" and f["conversation"][1]["text"].startswith("Left 60") and f["choice"] == "done" and f["missing_traits"] == ["political orientation", "race"] and f["prompts"] == [P1, P2] and not f["flags"], "follow-up record")
+    ok(f["source"] == "auto" and f["conversation"][1]["text"].startswith("Liberal 60") and f["choice"] == "done" and f["missing_traits"] == ["political orientation", "race/ethnicity"] and f["prompts"] == [P1, P2] and not f["flags"], "follow-up record")
+    ok(data["battery"]["allocation"]["stage_id"] == "pilot_60" and data["participant_key"] == KEY, "allocation metadata and participant key exported")
+    ok(S.get("submitted") == {"participant_key": KEY, "stage_id": "pilot_60"} and S.get("submits") == 1, "submit notified once after the download, keyed by the generated key")
+    with sp.expect_download(): sp.click("#dl")  # repeated download re-notifies; idempotency is server-side
+    for _ in range(50):
+        if S.get("submits", 0) >= 2: break
+        sp.wait_for_timeout(100)
+    ok(S.get("submits") == 2, "repeated download re-notifies submit")
     ok(not errors, f"no page errors {errors}")
 
     # Restore the settings the study changed

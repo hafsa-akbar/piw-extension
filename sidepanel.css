@@ -24,7 +24,6 @@ button.icon { border: 0; background: none; padding: 0 2px; margin-left: 8px; fon
 button.icon:hover { color: var(--fg); }
 .brand { display: flex; align-items: center; gap: 6px; }
 .brand button.icon { margin-left: 0; }
-.brand .logo { width: 20px; height: 20px; margin-right: -2px; }
 ul.tasks { list-style: none; padding: 0; margin: 8px 0; }
 ul.tasks li { display: flex; gap: 8px; padding: 7px 0; border-bottom: 1px solid var(--line); }
 .dot { width: 18px; flex: none; text-align: center; }
@@ -46,10 +45,16 @@ details.manual { margin-top: 16px; border-top: 1px solid var(--line); padding-to
 details.manual summary { color: var(--muted); cursor: pointer; }
 details.help { margin: 4px 0 10px; font-size: 12px; } details.help summary { color: var(--accent); cursor: pointer; } details.help ol { margin: 4px 0; padding-left: 18px; }
 .consent { font-size: 13px; } .consent ul { padding-left: 18px; margin: 4px 0 10px; } .consent h3 { font-size: 13px; margin: 12px 0 2px; }
-ol.rank { padding-left: 22px; }
-ol.rank li { margin: 5px 0; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft); cursor: grab; user-select: none; }
-ol.rank li.dragging { opacity: .4; }
-ol.rank .grip { color: var(--muted); margin-right: 8px; letter-spacing: -2px; }
+.intro p { margin: 0 0 4px; }
+.intro blockquote { margin: 6px 0 10px; padding: 6px 10px; border-left: 3px solid var(--accent); background: var(--soft); border-radius: 0 6px 6px 0; }
+p.ask { margin: 12px 0 6px; }
+label.option { display: flex; gap: 10px; margin: 8px 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; font-size: 13px; line-height: 1.45; cursor: pointer; }
+label.option:hover { background: var(--soft); }
+label.option:has(:checked) { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+label.option input { position: absolute; opacity: 0; }
+label.option .letter { flex: none; width: 22px; height: 22px; border-radius: 50%; border: 1px solid var(--line); display: grid; place-items: center; font-weight: 600; font-size: 12px; }
+label.option:has(:checked) .letter { background: var(--accent); border-color: var(--accent); color: var(--bg); }
+label.option:has(:focus-visible) { outline: 2px solid var(--accent); outline-offset: 1px; }
 details.checklist summary { cursor: pointer; margin: 4px 0; }
 table { border-collapse: collapse; width: 100%; font-size: 12px; } td { border-bottom: 1px solid var(--line); padding: 4px 2px; vertical-align: top; }
 .stepline { display: flex; align-items: flex-start; gap: 6px; margin: 8px 0; } .stepline > div { flex: 1; min-width: 0; }

@@ -24,21 +24,21 @@ let state;
 let timer = null;
 let busy = 0; // number of actions / Next checks running; live updates pause meanwhile
 let checking = false; // Next is running its checks
-const freshUi = () => ({ confirmed: false, pickManual: false, pickSelf: false, clicked: false, conv: null, lastText: null, discarded: null, settings: null, followup: null, traits: null, order: null });
+const freshUi = () => ({ confirmed: false, pickManual: false, pickSelf: false, clicked: false, conv: null, lastText: null, discarded: null, settings: null, followup: null, traits: null, pick: null });
 let ui = freshUi();
 
 const newData = () => ({
-  schema_version: 5,
+  schema_version: 6,
   extension_version: chrome.runtime.getManifest().version,
   participant_id: "",
   consent: null,
   started_at: null,
   completed_at: null,
-  battery: null, // sampled prompts: { source, sampled_at, items: [{ dataset, prompt_id, prompt, options?, ranking_question? }] }
+  battery: null, // sampled prompts: { source, sampled_at, items: [{ dataset, prompt_id, prompt, choice? }] }
   account: null,
   settings: null,
   memory_overview: null,
-  rankings: {},
+  choices: {}, // participant's pick per prompt_id: { dataset, question, choice, text, code, saved_at }
   responses: {},
   followup: null,
   unverified: UNVERIFIED,
@@ -48,7 +48,7 @@ const D = () => state.data;
 const steps = () => buildSteps(D().battery?.items);
 const step = () => steps()[state.step];
 const item = (i) => D().battery.items[i];
-const promptOf = (s) => (s.capture.prompt ? PROMPTS[s.capture.prompt] : item(s.capture.item).prompt);
+const promptOf = (s) => (s.capture.prompt ? PROMPTS[s.capture.prompt] : s.capture.followup ? item(s.capture.item).follow_up : item(s.capture.item).prompt);
 const save = () => chrome.storage.local.set({ piw: state });
 const update = async (fn) => { fn(D()); await save(); render(); };
 
@@ -65,6 +65,17 @@ const CHATS = {
 const hasToggle = () => D().account.personalization_toggle;
 const chatOf = (personalized) => CHATS[hasToggle() ? (personalized ? "personalized" : "unpersonalized") : personalized ? "regular" : "temporary"];
 const chatFor = (s) => (s.capture.prompt ? CHATS.regular : chatOf(s.capture.personalized));
+
+// Tamper-evidence for the downloaded file: HMAC over canonical JSON (sorted keys, no whitespace), checked by
+// scripts/verify.js (keep canon/SIG_KEY in sync). Deters hand-editing only — the key ships with the extension.
+const SIG_KEY = "0f4d3a579a13ac7277591e41c8bc7f6c6e20a62e81f402036f00da6c93c563b5";
+const canon = (v) => Array.isArray(v) ? `[${v.map((x) => canon(x === undefined ? null : x)).join(",")}]`
+  : v && typeof v === "object" ? `{${Object.keys(v).filter((k) => v[k] !== undefined).sort().map((k) => `${JSON.stringify(k)}:${canon(v[k])}`).join(",")}}`
+  : JSON.stringify(v);
+async function hmac(text) {
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(SIG_KEY), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  return [...new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(text)))].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
 
 // ---------- ChatGPT tab ----------
 
@@ -141,7 +152,7 @@ async function refreshBanner() {
 
 // ---------- Rendering ----------
 
-const view = (s) => VIEWS[s.capture ? "capture" : s.part ? "intro" : s.rank !== undefined ? "rank" : s.id];
+const view = (s) => VIEWS[s.capture ? "capture" : s.part ? "intro" : s.choice !== undefined ? "choice" : s.id];
 const mark = { ok: "✓", bad: "✗", wait: "○" };
 const line = (status, html) => `<li><span class="dot ${status}">${mark[status]}</span><span>${html}</span></li>`;
 const act = (name, label) => `<a class="act" data-act="${name}">${label}</a>`;
@@ -163,7 +174,7 @@ function renderPick() {
 const basicPlan = () => ["Free", "Go"].includes(D().account?.plan);
 function confirmBox(chat) {
   const basic = basicPlan();
-  const model = basic ? "<b>Think</b> is off" : "Thinking effort is <b>Instant</b> and the model is <b>GPT-6</b>";
+  const model = basic ? "<b>Think</b> is off" : "Thinking effort is <b><u>Instant</u></b> and the model is <b><u>GPT-6</u></b>";
   const text = chat === CHATS.regular ? `<b>Chat</b> is selected${basic ? " and " : ", "}${model}` : model;
   const guide = chat === CHATS.regular ? `<video src="assets/${basic ? "free-go" : "paid"}-chat.webm" autoplay loop muted playsinline></video>`
     : basic ? `<img src="assets/free-go-think-off.jpg" alt="The Think button in ChatGPT's message box, left off">`
@@ -269,7 +280,8 @@ const VIEWS = {
     next: async () => {
       if (!$("#age").checked || !$("#agree").checked) return ["Tick both boxes to continue."];
       let battery = D().battery;
-      try { battery ||= await sampleBattery(); }
+      // Allocation is keyed by a generated participant key, not the Prolific ID, which never leaves the browser.
+      try { battery ||= await sampleBattery(D().participant_key ||= crypto.randomUUID()); }
       catch (e) { return [`Couldn't load the study prompts. Try again in a minute; if it keeps failing, contact the research team. <span class="muted">(${esc(e.message)})</span>`]; }
       await update((d) => {
         d.participant_id = $("#pid").value.trim();
@@ -308,16 +320,14 @@ const VIEWS = {
             <li>Click your profile icon on bottom left of dashboard → <b>Settings</b> → <b>Personalization</b> (or simply go to chatgpt.com/settings/personalization).</li>
             <li>Turn <b>Enable memory</b> on.</li>
             <li>Under <b>Additional ChatGPT settings</b>, turn <b>Web Search</b> off, then click <b>Save</b>.</li>
-            <li>Click <b>Manage</b> next to Memory Overview, copy everything above the "Dive Deeper" heading and paste it here:</li>
           </ol>
-          <textarea id="manualmem" placeholder="Paste your Memory Overview — it's saved when you click Next"></textarea>
           <p>If the helper can't read a toggle, confirm it yourself:</p>
           <label class="check"><input type="checkbox" id="selfmem" ${D().settings?.memory_enabled?.self_report ? "checked" : ""}> "Enable memory" is on</label>
           <label class="check"><input type="checkbox" id="selfweb" ${D().settings?.web_search?.self_report === false ? "checked" : ""}> "Web Search" is off</label>`)}`;
     },
     bind: () => {
-      $("#selfmem").onchange = (e) => saveSettings({ memSelf: e.target.checked ? true : null });
-      $("#selfweb").onchange = (e) => saveSettings({ webSelf: e.target.checked ? false : null });
+      $("#selfmem").onchange = (e) => saveSettings({ memSelf: e.target.checked ? true : null }, false);
+      $("#selfweb").onchange = (e) => saveSettings({ webSelf: e.target.checked ? false : null }, false);
     },
     live: async () => {
       try { ui.settings = await run("readSettings"); } catch { ui.settings = null; }
@@ -333,8 +343,6 @@ const VIEWS = {
       all: async () => { await toggle("memory", true); await toggle("web", false); await captureOverview(); },
     },
     next: async () => {
-      const pasted = $("#manualmem").value.trim();
-      if (!D().memory_overview && pasted) D().memory_overview = { text: pasted, source: "manual_paste", captured_at: now(), flags: ["manual_entry"] };
       await ensureSettingsPage();
       const s = D().settings, errors = [];
       const mem = s?.memory_enabled.observed ?? s?.memory_enabled.self_report;
@@ -368,11 +376,14 @@ const VIEWS = {
     html: (s) => {
       const chat = chatFor(s), rec = getRecord(s), text = promptOf(s), n = chat.pick === undefined ? 1 : 2;
       return `
-        <p>1. ${act("newchat", `Open a new ${chat.name}`)}.</p>
-        ${n === 2 ? `<div class="stepline"><span>2.</span><div><div id="pick"></div>
-          <details class="where"><summary>Show me how</summary>${guideVideo(chat.pick)}</details></div></div>` : ""}
-        <div class="stepline"><span>${n + 1}.</span><div>${confirmBox(chat)}</div></div>
-        <p>${n + 2}. ${act("insert", "Insert the prompt")}, then press ${sendIcon(chat)} in ChatGPT to send it.</p>
+        ${s.capture.followup ? `
+          <p>1. Stay in the same ${chat.name} — this follow-up continues the conversation you just had.</p>
+          <p>2. ${act("insert", "Insert the follow-up")}, then press ${sendIcon(chat)} in ChatGPT to send it.</p>` : `
+          <p>1. ${act("newchat", `Open a new ${chat.name}`)}.</p>
+          ${n === 2 ? `<div class="stepline"><span>2.</span><div><div id="pick"></div>
+            <details class="where"><summary>Show me how</summary>${guideVideo(chat.pick)}</details></div></div>` : ""}
+          <div class="stepline"><span>${n + 1}.</span><div>${confirmBox(chat)}</div></div>
+          <p>${n + 2}. ${act("insert", "Insert the prompt")}, then press ${sendIcon(chat)} in ChatGPT to send it.</p>`}
         ${promptBlock(text)}
         ${rec ? `<div class="box">${rec.flags.length ? `<span class="warn">⚠ Saved with flags: ${esc(rec.flags.join(", "))}</span>` : `<span class="ok">✓ Saved</span>`}
               <pre>${esc(rec.response_text)}</pre><p>${act("redo", "Discard and redo")}</p></div>`
@@ -389,7 +400,7 @@ const VIEWS = {
       if (getRecord(s)) return;
       try { ui.conv = await run("readConversation"); } catch { ui.conv = null; }
       if (step().id !== s.id) return; // the participant moved on while ChatGPT was being read
-      const text = ui.conv?.messages.find((m) => m.role === "assistant")?.text ?? null;
+      const text = ui.conv?.messages.filter((m) => m.role === "assistant")[s.capture.followup ? 1 : 0]?.text ?? null;
       if (ui.conv) ui.conv.stable = text !== null && text === ui.lastText;
       ui.lastText = text;
       renderPick();
@@ -404,12 +415,12 @@ const VIEWS = {
       insert: (s) => insert(promptOf(s)),
       redo: async (s) => {
         ui.discarded = getRecord(s)?.response_text ?? null;
-        await update((d) => { delete d.responses[s.id]; });
+        await update((d) => { delete d.responses[s.id]; delete d.responses[`${s.id}_followup`]; }); // a follow-up answered in the discarded chat goes with it
       },
     },
     next: async (s) => {
       if (getRecord(s)) return;
-      if (!ui.confirmed) return [`Tick the box in step ${chatFor(s).pick === undefined ? 2 : 3} once ChatGPT's settings match.`];
+      if (!s.capture.followup && !ui.confirmed) return [`Tick the box in step ${chatFor(s).pick === undefined ? 2 : 3} once ChatGPT's settings match.`];
       await VIEWS.capture.live(s);
       await sleep(900);
       await VIEWS.capture.live(s); // second read confirms the response stopped changing
@@ -423,32 +434,32 @@ const VIEWS = {
     },
   },
 
-  rank: {
+  choice: {
     nextLabel: "Save & continue",
     html: (s) => {
-      const it = item(s.rank);
-      const order = (ui.order ||= [...(D().rankings[it.prompt_id]?.order || it.options)]);
+      const c = item(s.choice).choice;
+      ui.pick ??= D().choices[item(s.choice).prompt_id]?.choice ?? null;
+      ui.choiceAt ??= Date.now();
       return `
-        <p>${esc(it.ranking_question)}</p>
-        <p class="muted">Drag to reorder: most important at the top.</p>
-        <ol class="rank">${order.map((o) => `<li draggable="true" data-v="${esc(o)}"><span class="grip">⋮⋮</span>${esc(o)}</li>`).join("")}</ol>`;
+        <div class="intro">${c.intro.split(/\n\s*\n/).map((t) => /^["“].*["”]$/s.test(t.trim()) ? `<blockquote>${esc(t.trim().slice(1, -1))}</blockquote>` : `<p>${esc(t)}</p>`).join("")}</div>
+        <p class="ask"><b>${esc(c.question)}</b></p>
+        <p class="bad">Please read the options carefully.</p>
+        ${c.options.map((o) => `<label class="option"><input type="radio" name="pick" value="${o.label}" ${ui.pick === o.label ? "checked" : ""}>
+          <span class="letter">${o.label}</span><span>${esc(o.text)}</span></label>`).join("")}
+        <p class="muted" id="dwell"></p>`;
     },
-    bind: () => {
-      const list = $("ol.rank");
-      let dragged = null;
-      list.querySelectorAll("li").forEach((li) => {
-        li.ondragstart = () => { dragged = li; li.classList.add("dragging"); };
-        li.ondragend = () => { li.classList.remove("dragging"); ui.order = [...list.children].map((x) => x.dataset.v); };
-        li.ondragover = (e) => {
-          e.preventDefault();
-          const r = li.getBoundingClientRect();
-          if (dragged && dragged !== li) list.insertBefore(dragged, e.clientY < r.top + r.height / 2 ? li : li.nextSibling);
-        };
-      });
+    bind: () => document.querySelectorAll("input[name=pick]").forEach((r) => (r.onchange = () => { ui.pick = r.value; setErrors(); })),
+    live: (s) => {
+      const done = D().choices[item(s.choice).prompt_id] || Date.now() - ui.choiceAt >= 60000;
+      $("#dwell").textContent = done ? "" : `You can continue in ${Math.ceil((60000 - (Date.now() - ui.choiceAt)) / 1000)} s.`;
+      $("#next").classList.toggle("ready", !!done && !!ui.pick);
     },
     next: (s) => {
-      const it = item(s.rank);
-      return update((d) => { d.rankings[it.prompt_id] = { dataset: it.dataset, question: it.ranking_question, order: [...ui.order], saved_at: now() }; });
+      if (!D().choices[item(s.choice).prompt_id] && Date.now() - ui.choiceAt < 60000)
+        return ["Please spend at least 1 minute on this question, to make sure you've read the options."];
+      if (!ui.pick) return ["Pick one response."];
+      const it = item(s.choice), o = it.choice.options.find((x) => x.label === ui.pick);
+      return update((d) => { d.choices[it.prompt_id] = { dataset: it.dataset, question: it.choice.text, choice: o.label, text: o.text, code: o.code, saved_at: now() }; });
     },
   },
 
@@ -538,7 +549,7 @@ const VIEWS = {
 
   review: {
     html: () => {
-      const rows = steps().filter((s) => s.capture || s.rank !== undefined || ["account", "setup", "followup"].includes(s.id)).map((s) => {
+      const rows = steps().filter((s) => s.capture || s.choice !== undefined || ["account", "setup", "followup"].includes(s.id)).map((s) => {
         const rec = recordOf(s), flags = rec?.flags || [];
         return { missing: !rec, html: `<tr><td>${esc(s.title)}</td><td>${!rec ? `<span class="bad">✗ missing</span>` : flags.length ? `<span class="warn">⚠ ${esc(flags.join(", "))}</span>` : `<span class="ok">✓</span>`}</td></tr>` };
       });
@@ -566,19 +577,22 @@ const VIEWS = {
         D().completed_at = now();
         await save();
         const a = document.createElement("a");
-        a.href = URL.createObjectURL(new Blob([JSON.stringify(D(), null, 2)], { type: "application/json" }));
+        a.href = URL.createObjectURL(new Blob([JSON.stringify({ ...D(), integrity: await hmac(canon(D())) }, null, 2)], { type: "application/json" }));
         a.download = `piw_${(D().participant_id || "participant").replace(/\W+/g, "_")}_${D().completed_at.slice(0, 10)}.json`;
         a.click();
         $("#saved").hidden = false;
         $("#saved").textContent = `✓ Downloaded ${a.download}`;
+        const stage = D().battery.allocation?.stage_id; // absent for participants who started before the allocator existed
+        if (stage) try { await supa("submit", { participant_key: D().participant_key, stage_id: stage }); }
+        catch { setErrors(["Your file downloaded, but the study server couldn't be notified. Check your connection and click <b>Download my data</b> again."]); }
       };
     },
     actions: {
       preview: () => { const p = $("#json"); p.hidden = !p.hidden; p.textContent = JSON.stringify(D(), null, 2); },
       restore: async () => {
-        await ensureSettingsPage();
         const init = D().settings.initial;
-        for (const [key, k] of [["memory", "memory_enabled"], ["web", "web_search"]]) if (init[k] != null) await run("setToggle", key, init[k]);
+        // ensureSettingsPage before each toggle: saving the first one can re-render and collapse the extras section.
+        for (const [key, k] of [["memory", "memory_enabled"], ["web", "web_search"]]) if (init[k] != null) { await ensureSettingsPage(); await run("setToggle", key, init[k]); }
         setErrors(["Your original settings are back."]);
       },
       wipe: () => startOver("Delete all study data stored by this extension?"),
@@ -633,10 +647,10 @@ async function toggle(key, want) {
 
 async function captureOverview() {
   await ensureSettingsPage();
-  if (!(await run("openMemoryOverview"))) throw new Error(`Couldn't find the "Manage" button next to Memory Overview. Use Manual steps below.`);
+  if (!(await run("openMemoryOverview"))) throw new Error(`Couldn't find the "Manage" button next to Memory Overview. Reload the ChatGPT tab and try again.`);
   let prev = null;
   const text = await until(() => run("memoryOverviewText"), (t) => { const stable = !!t && t === prev; prev = t; return stable; }, 30000);
-  if (!text) throw new Error(`The Memory Overview didn't load (looked for the "Dive Deeper" heading). Try again, or use Manual steps.`);
+  if (!text) throw new Error(`The Memory Overview didn't load (looked for the "Dive Deeper" heading). Try again; if it keeps failing, copy diagnostic info under Manual steps and contact the research team.`);
   await update((d) => { d.memory_overview = { text, source: "auto", captured_at: now(), flags: [] }; });
 }
 
@@ -647,7 +661,7 @@ const setRecord = (s, rec) => update((d) => { d.responses[s.id] = rec; });
 
 function recordOf(s) {
   if (s.capture) return getRecord(s);
-  if (s.rank !== undefined) return D().rankings[item(s.rank).prompt_id];
+  if (s.choice !== undefined) return D().choices[item(s.choice).prompt_id];
   if (s.id === "setup") return D().settings && D().memory_overview ? { flags: [...D().settings.flags, ...D().memory_overview.flags] } : null;
   return D()[s.id];
 }
@@ -685,26 +699,37 @@ function followupSteps() {
 
 // What this step requires of the current ChatGPT page. status: ok | bad | wait; each hint says how to fix it.
 function checks(conv, s) {
-  const chat = chatFor(s);
+  const chat = chatFor(s), fu = !!s.capture.followup, k = fu ? 1 : 0;
   const users = conv.messages.filter((m) => m.role === "user"), bots = conv.messages.filter((m) => m.role === "assistant");
-  const u = users[0], bot = bots[0], L = [];
+  const u = users[k], bot = bots[k], L = [];
   const add = (code, status, hint) => L.push({ code, status, hint });
   const reopen = act("newchat", `Open a new ${chat.name}`);
 
-  add("chat", chat.ok(conv) || ui.pickSelf ? "ok" : "bad", chat.pick === undefined ? `Wrong kind of chat for this prompt. ${reopen}.`
-    : `Couldn't confirm <b>${chat.pick ? "Personalized" : "Unpersonalized"}</b> is selected. ${reopen}, or tick step 2 yourself if it is.`);
-  const reused = conv.url.includes("/c/") && Object.entries(D().responses).some(([id, r]) => id !== s.id && r.conversation_url === conv.url);
-  add("new_chat", !u ? "wait" : users.length === 1 && bots.length <= 1 && !reused ? "ok" : "bad",
-    !u ? `${act("insert", "Insert the prompt")} and send it.` : `This chat was already used. ${reopen}.`);
-  if (u) add("prompt_match", norm(u.text) === norm(promptOf(s)) ? "ok" : "bad", `The message doesn't match the prompt. ${reopen} and insert it again.`);
+  if (fu) {
+    // The follow-up must land in the conversation that answered the main prompt; Temporary Chats share a URL, so match by content.
+    add("same_chat", users[0] && norm(users[0].text) === norm(item(s.capture.item).prompt) ? "ok" : "bad",
+      "This isn't the chat where you sent the prompt. Go <b>Back</b>, <b>Discard and redo</b> it, then send the follow-up in that same chat.");
+    add("sent_once", !u ? "wait" : users.length === 2 ? "ok" : "bad",
+      !u ? `${act("insert", "Insert the follow-up")} and send it.` : "Extra messages were sent in this chat. Paste ChatGPT's answer under Manual steps.");
+  } else {
+    add("chat", chat.ok(conv) || ui.pickSelf ? "ok" : "bad", chat.pick === undefined ? `Wrong kind of chat for this prompt. ${reopen}.`
+      : `Couldn't confirm <b>${chat.pick ? "Personalized" : "Unpersonalized"}</b> is selected. ${reopen}, or tick step 2 yourself if it is.`);
+    const reused = conv.url.includes("/c/") && Object.entries(D().responses).some(([id, r]) => id !== s.id && r.conversation_url === conv.url);
+    add("new_chat", !u ? "wait" : users.length === 1 && bots.length <= 1 && !reused ? "ok" : "bad",
+      !u ? `${act("insert", "Insert the prompt")} and send it.` : `This chat was already used. ${reopen}.`);
+  }
+  if (u) add("prompt_match", norm(u.text) === norm(promptOf(s)) ? "ok" : "bad",
+    fu ? "The second message doesn't match the follow-up. Insert it again and send it." : `The message doesn't match the prompt. ${reopen} and insert it again.`);
   add("response_complete", bot?.text && !conv.generating && conv.stable !== false ? "ok" : "wait", "Waiting for ChatGPT to finish responding.");
-  if (bot?.text && bot.text === ui.discarded) add("discarded", "bad", `This is the response you discarded. ${reopen}.`);
+  if (bot?.text && bot.text === ui.discarded) add("discarded", "bad",
+    fu ? "This is the response you discarded. Ask ChatGPT to regenerate it, or paste the answer under Manual steps." : `This is the response you discarded. ${reopen}.`);
   return L;
 }
 
 // Called once every blocking check passes, so the only possible flags are web_links and a self-reported dropdown choice.
 async function saveCapture(s, conv) {
-  const u = conv.messages.find((m) => m.role === "user"), bot = conv.messages.find((m) => m.role === "assistant");
+  const k = s.capture.followup ? 1 : 0;
+  const u = conv.messages.filter((m) => m.role === "user")[k], bot = conv.messages.filter((m) => m.role === "assistant")[k];
   await setRecord(s, {
     ...recordBase(s),
     user_message_sent: u?.text ?? null,
@@ -743,7 +768,7 @@ $("#next").onclick = async () => {
   go(1);
   // Within a part, saving a prompt opens a new chat for the next one.
   const s = step();
-  if (s.capture?.item > 0 && !getRecord(s)) $('#view [data-act="newchat"]').click();
+  if (s.capture?.item > 0 && !s.capture.followup && !getRecord(s)) $('#view [data-act="newchat"]').click();
 };
 async function startOver(question) {
   if (!confirm(question)) return;
@@ -792,7 +817,7 @@ $("#goto-chatgpt").onclick = async (e) => {
 chrome.tabs.onActivated.addListener(refreshBanner);
 chrome.tabs.onUpdated.addListener(refreshBanner);
 chrome.storage.local.get("piw").then(({ piw }) => {
-  state = piw?.data?.schema_version === 5 ? piw : { step: 0, data: newData() };
+  state = piw?.data?.schema_version === 6 ? piw : { step: 0, data: newData() };
   setZoom(state.zoom ?? 1);
   render();
 });

@@ -156,31 +156,43 @@ globalThis.PIW = {
     return this.switchRows().filter((r) => this.LABELS[key].test(r.label)).sort((a, b) => a.label.length - b.label.length)[0] || null;
   },
 
+  // ChatGPT controls can be pointer-press-gated and off-screen, so scroll to them and press (which includes a click).
   clickByText(re) {
     const el = [...document.querySelectorAll("button, summary, [role=button], a")].find((b) => this.visible(b) && !b.disabled && re.test(this.norm(b.innerText)));
-    el?.click();
+    if (el) { el.scrollIntoView({ block: "center" }); this.press(el); }
     return !!el;
+  },
+
+  // The Web Search switch hides inside "Additional ChatGPT settings": expanding may need a pointer press and a
+  // beat to render, and saving can collapse it again, so poll and re-press instead of a single try.
+  async expandTo(key) {
+    for (let i = 0; i < 8 && !this.findSwitch(key); i++) {
+      if (i % 4 === 0) this.clickByText(/^additional chatgpt settings/i);
+      await this.sleep(300);
+    }
+    return this.findSwitch(key);
   },
 
   // null = toggle not found. `expand` opens "Additional ChatGPT settings" if Web Search is hidden in it.
   async readSettings(expand = false) {
     if (!this.onSettingsPage()) return { on_page: false };
-    if (expand && !this.findSwitch("web") && this.clickByText(/^additional chatgpt settings/i)) await this.sleep(400);
+    if (expand) await this.expandTo("web");
     return { on_page: true, memory_enabled: this.findSwitch("memory")?.on ?? null, web_search: this.findSwitch("web")?.on ?? null };
   },
 
   // Flips a settings toggle to `want`, clicks Save if the page has one, and returns the new state.
   async setToggle(key, want) {
     if (!this.onSettingsPage()) return { on_page: false };
-    if (!this.findSwitch(key) && this.clickByText(/^additional chatgpt settings/i)) await this.sleep(400);
-    const row = this.findSwitch(key);
+    const row = await this.expandTo(key);
     if (!row) return { on_page: true, state: null };
+    row.sw.scrollIntoView({ block: "center" });
     if (row.on !== want) {
-      row.sw.click();
+      this.press(row.sw);
       await this.sleep(400);
-      if (this.clickByText(/^save( changes)?$/i)) await this.sleep(800);
     }
-    return { on_page: true, state: this.findSwitch(key)?.on ?? null };
+    const state = this.findSwitch(key)?.on ?? null; // read before Save: saving can re-render and collapse the section
+    if (row.on !== want && this.clickByText(/^save( changes)?$/i)) await this.sleep(800);
+    return { on_page: true, state };
   },
 
   // Clicks "Manage" next to Memory Overview.

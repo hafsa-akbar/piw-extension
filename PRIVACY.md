@@ -11,7 +11,7 @@ Only while a participant works through the study steps, and only on chatgpt.com:
 - whether ChatGPT's "Enable memory" and "Web search" settings are on
 - the participant's ChatGPT Memory Overview
 - the study prompts and ChatGPT's responses to them, in the chats opened for the study
-- the participant's answers in the extension (rankings and follow-up choices)
+- the participant's answers in the extension (which example response they prefer, and follow-up choices)
 
 It does not read other conversations, the chat history list, names, email addresses, or anything on other websites.
 
@@ -19,10 +19,14 @@ It does not read other conversations, the chat history list, names, email addres
 
 The extension does not send this data anywhere. It is stored in the participant's own browser
 (`chrome.storage.local`) until the participant downloads it as a file on the last step and uploads that file to the study
-survey. Participants can review the file before uploading it.
+survey. Participants can review the file before uploading it. The file includes an `integrity` checksum of its own
+contents (no extra data) so the research team can tell whether a file was edited after download.
 
-The extension's only network request is downloading the public list of study prompts from GitHub
-(github.com/hafsa-akbar/llm-personalization-ecological-validity). That request contains no participant data.
+The extension makes two kinds of network request. It downloads the public list of study prompts from GitHub
+(github.com/hafsa-akbar/llm-personalization-ecological-validity); that request contains no participant data. It also
+contacts the study's allocation server (Supabase) twice: at consent, sending only a randomly generated participant key
+to receive the participant's assigned prompt IDs, and at download, to record that the file was downloaded. The Prolific
+ID, ChatGPT content, memory text, and responses are never sent to either.
 
 ## How the research team handles submitted data
 

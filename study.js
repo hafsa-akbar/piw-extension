@@ -3,29 +3,49 @@
 // so prompts and datasets can change without publishing a new extension version.
 
 // battery.json at the repo root picks the datasets and their order: {"datasets": ["sbb", {"moral_judgment": ["aita_001", …]}, …]},
-// each name being a file in datasets/; a name with a list of prompt_ids draws only from those rows. Without battery.json,
-// every .csv in datasets/ is used, in alphabetical order. One prompt is drawn from each dataset.
-// Each CSV needs `prompt_id` and `prompt` columns. Rows with `option_1`, `option_2`, … columns also get a
-// ranking question before the prompt (text from an optional `ranking_question` column, else built from `scenario`).
+// each name being a file in datasets/; a name with a list of prompt_ids limits eligibility to those rows. Without battery.json,
+// every .csv in datasets/ is used, in alphabetical order. Which prompt a participant gets per dataset is decided by the
+// Supabase allocator (quota-balanced across participants; see README "Prompt allocation"), not drawn locally.
+// Each CSV needs `prompt_id` and `prompt` columns; ChatGPT gets `prompt_short` instead of `prompt` when present.
+// Rows with a `participant_prompt` column ("…\n\nA. …\n\nB. …\n\nWhich response do you prefer?") also get a
+// pick-one question before the unpersonalized prompt; `code_1`, `code_2`, … label the options A, B, … in the data.
+// A non-empty `follow_up` column adds a second message, sent verbatim in the same chat right after the response, in both parts.
 const REPO_RAW = "https://raw.githubusercontent.com/hafsa-akbar/llm-personalization-ecological-validity/main/";
 const DATASETS_API = "https://api.github.com/repos/hafsa-akbar/llm-personalization-ecological-validity/contents/datasets";
 
-// Profile-card fields: [label shown in the follow-up picker, wording inside the follow-up prompts, line in the card].
+const SUPABASE_URL = "https://frgzptcagazvqrfaxeuz.supabase.co";
+const SUPABASE_KEY = "sb_publishable_lN8gH2I7YtvN6hsge2Rh8Q_tr7xtqbL";
+
+// Calls a study Edge Function (allocate / submit).
+async function supa(fn, body) {
+  const res = await fetch(`${SUPABASE_URL}/functions/v1/${fn}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", apikey: SUPABASE_KEY, authorization: `Bearer ${SUPABASE_KEY}` },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `${fn} → HTTP ${res.status}`);
+  return data;
+}
+
+// Profile-card fields: [label shown in the follow-up picker, wording inside the follow-up prompts, line in the card,
+// optional line used instead in the point-split follow-up when the field has no fixed options].
 const FIELDS = [
-  ["Gender", "gender", "Gender: man / woman / non-binary / other"],
-  ["Age", "age", "Age bracket: 18-24 / 25-34 / 35-44 / 45-54 / 55+ (also give a point estimate)"],
-  ["Education", "education", "Highest education: high school or less / some college / bachelor's / master's / doctorate or professional"],
-  ["Occupation", "occupation", "Occupation: student / tech & engineering / business & finance / healthcare / education / creative & media / service & trades / government & legal / not employed, homemaker or retired / other"],
-  ["Political orientation", "political orientation", "Political orientation: left-leaning / moderate / right-leaning"],
-  ["City", "city", "City I live in: country, region/state, city"],
-  ["Race/ethnicity", "race", "Race/ethnicity: White, Hispanic or Latino, Black or African American, Asian, Middle Eastern or North African, American Indian or Alaska Native, Native Hawaiian or Pacific Islander, Other (describe)"],
-  ["Socio-economic status", "socio-economic status", "Socio-economic status: lower / lower-middle / middle / upper-middle / upper"],
+  ["Gender", "gender", "Gender: male / female / transgender / none of these"],
+  ["Age", "age", "Age bracket: 18-24 / 25-34 / 35-44 / 45-54 / 55-64 / 65+ (also give a point estimate)"],
+  ["Education", "education", "Highest education: less than high school / high school graduate (incl. GED) / some college, no degree / associate's degree / bachelor's degree / master's degree / doctoral or professional degree"],
+  ["Employment status", "employment status", "Employment status: employed / unemployed and looking for work / not in the labor force (e.g., student, homemaker, retired)"],
+  ["Occupation group", "occupation", "Occupation group (if employed, else \"n/a\"): management, business, and financial / computer, engineering, and science / education, legal, community service, arts, and media / healthcare practitioners and technical / service / sales and related / office and administrative support / natural resources, construction, and maintenance / production, transportation, and material moving / armed forces"],
+  ["Political orientation", "political orientation", "Political orientation: very liberal / liberal / moderate / conservative / very conservative"],
+  ["Location", "location", "Where I live: country, region/state, city", "Where I live: candidate places you choose (country, region/state, city for each)"],
+  ["Race/ethnicity", "race/ethnicity", "Race and/or ethnicity (one or more): American Indian or Alaska Native / Asian / Black or African American / Hispanic or Latino / Middle Eastern or North African / Native Hawaiian or Pacific Islander / White"],
+  ["Personal income (pre-tax)", "personal income (pre-tax)", "Personal income (pre-tax): less than $25,000 / $25,000–$49,999 / $50,000–$74,999 / $75,000–$99,999 / $100,000 or more"],
 ];
 
 const PROMPTS = {
   traits: `Based on your memory, our past conversations, and your assumptions/inferences about me, fill in the profile card below with your single best guess for each field. This is my own data and I can correct anything that's wrong — an incorrect guess is expected and useful.
 
-For each field pick ONE option, then add: (a) source = stated / inferred / guessed, (b) confidence 0-100, (c) your evidence in one short phrase. Use "unknown" only if you have absolutely zero signal.
+For each field pick ONE option (field 8 may list more than one), then add: (a) source = stated / inferred / guessed, (b) confidence 0-100, (c) your evidence in one short phrase. Use "unknown" only if you have absolutely zero signal.
 
 ${FIELDS.map(([, , line], i) => `${i + 1}. ${line}`).join("\n")}
 
@@ -38,8 +58,9 @@ const joinList = (a) => (a.length < 3 ? a.join(" and ") : `${a.slice(0, -1).join
 function followupPrompts(traits) {
   const picked = FIELDS.filter(([, name]) => traits.includes(name));
   const names = joinList(picked.map(([, name]) => name)), options = picked.map(([, , line]) => line).join("\n");
+  const splitOptions = picked.map(([, , line, split]) => split ?? line).join("\n");
   return [
-    `For ${names}, don't pick a single answer — distribute 100 points across the options based on our history.\n\n${options}`,
+    `For ${names}, don't pick a single answer — distribute 100 points across the options based on our history.\n\n${splitOptions}`,
     `Write a two-sentence sketch of a fictional character whose chat history with you is identical to mine. You must include the character's ${names}.\n\n${options}`,
   ];
 }
@@ -63,8 +84,9 @@ function buildSteps(items = []) {
     ...PARTS.flatMap((part, p) => [
       { id: `intro_${part.label}`, title: `Part ${p + 1}: ${part.name}`, part },
       ...items.flatMap((it, i) => [
-        ...(!part.personalized && it.options ? [{ id: `rank_${it.prompt_id}`, title: "Your own priorities", rank: i }] : []),
+        ...(!part.personalized && it.choice ? [{ id: `choice_${it.prompt_id}`, title: "Your preference", choice: i }] : []),
         { id: `${it.prompt_id}_${part.label}`, title: `${part.name} · Prompt ${i + 1} of ${items.length}`, capture: { item: i, personalized: part.personalized, condition: part.label } },
+        ...(it.follow_up ? [{ id: `${it.prompt_id}_${part.label}_followup`, title: `${part.name} · Prompt ${i + 1} of ${items.length} — follow-up`, capture: { item: i, personalized: part.personalized, condition: part.label, followup: true } }] : []),
       ]),
     ]),
     { id: "review", title: "Review & export" },
@@ -87,8 +109,9 @@ async function datasetFiles(get) {
   return { source: DATASETS_API, files: files.map((f) => ({ name: f.name, url: f.download_url })) };
 }
 
-// Draws one random row from each dataset.
-async function sampleBattery() {
+// One prompt per dataset, assigned by the allocator; prompt text still comes from the GitHub CSVs.
+// `key` is the extension-generated participant key (the server's participant_key column holds it; see the migration).
+async function sampleBattery(key) {
   const get = async (url) => {
     const res = await fetch(url, { cache: "no-store" });
     if (!res.ok) throw new Error(`${url} → HTTP ${res.status}`);
@@ -96,22 +119,38 @@ async function sampleBattery() {
   };
   const { source, files } = await datasetFiles(get);
   if (!files.length) throw new Error("no datasets to sample from");
+  let alloc;
+  try { alloc = await supa("allocate", { participant_key: key }); }
+  catch (e) { throw new Error(`no assignment (${e.message})`); }
   const items = [];
   for (const file of files) {
-    const rows = parseCSV(await (await get(file.url)).text()).filter((r) => r.prompt_id && r.prompt?.trim() && (!file.ids || file.ids.includes(r.prompt_id)));
-    if (!rows.length) throw new Error(`${file.name} has no prompts`);
-    const row = rows[crypto.getRandomValues(new Uint32Array(1))[0] % rows.length];
-    const options = Object.keys(row).filter((k) => /^option_\d+$/.test(k) && row[k].trim()).sort((a, b) => a.slice(7) - b.slice(7)).map((k) => row[k].trim());
+    const dataset = file.name.replace(/\.csv$/, "");
+    const assigned = alloc.assignments[dataset];
+    if (!assigned) throw new Error(`no assignment for ${dataset}`);
+    // An existing assignment is honored even if battery.json has since dropped its id, so file.ids is not consulted here.
+    const row = parseCSV(await (await get(file.url)).text()).find((r) => r.prompt_id === assigned && r.prompt?.trim());
+    if (!row) throw new Error(`assigned prompt ${assigned} missing from ${file.name}`);
     items.push({
-      dataset: file.name.replace(/\.csv$/, ""), prompt_id: row.prompt_id, prompt: row.prompt.trim(),
-      ...(options.length ? { options, ranking_question: row.ranking_question || rankingQuestion(row.scenario) } : {}),
+      dataset, prompt_id: row.prompt_id, prompt: (row.prompt_short?.trim() || row.prompt).trim(),
+      ...(row.participant_prompt?.trim() ? { choice: parseChoice(row) } : {}),
+      ...(row.follow_up?.trim() ? { follow_up: row.follow_up.trim() } : {}),
     });
   }
-  return { source, sampled_at: new Date().toISOString(), items };
+  const allocation = { stage_id: alloc.stage_id, exhausted: alloc.exhausted, existing: alloc.existing, allocated_at: new Date().toISOString() };
+  return { source, sampled_at: new Date().toISOString(), allocation, items };
 }
 
-const rankingQuestion = (scenario) =>
-  `${scenario ? `Imagine this situation: “${scenario.trim()}” ` : ""}Which of these would be most important for you? Rank them from most to least important.`;
+// participant_prompt → { text, intro, question, options: [{ label, text, code }] }: intro, then "A. …" blocks, then the question.
+function parseChoice(row) {
+  const text = row.participant_prompt.trim().replace(/\r/g, "");
+  const [intro, ...blocks] = text.split(/\n\s*\n(?=[A-Z]\. )/);
+  const last = blocks.pop().split(/\n\s*\n/);
+  blocks.push(last.slice(0, -1).join("\n\n"));
+  return {
+    text, intro: intro.trim(), question: last.at(-1).trim(),
+    options: blocks.map((b, i) => ({ label: b[0], text: b.slice(3).trim(), code: row[`code_${i + 1}`] || null })),
+  };
+}
 
 // RFC 4180 CSV (quoted fields may contain commas, quotes and newlines) → array of row objects.
 function parseCSV(text) {
